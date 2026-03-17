@@ -1,5 +1,10 @@
-"""Streamlit UI — QTO Pipeline."""
-import hashlib, logging, os, sys, time, traceback
+"""Streamlit UI — QTO Pipeline.
+
+Uses background threads for long-running steps so Streamlit reruns
+cannot interrupt them. Each step runs to completion in its own thread,
+and the UI polls for results.
+"""
+import logging, os, sys, time, traceback, threading
 import streamlit as st
 import pandas as pd
 
@@ -30,66 +35,93 @@ st.title("Construction QTO Pipeline")
 logging.basicConfig(level=logging.INFO, format="[%(name)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
 
-def _file_data_hash(file_data):
-    """Create a stable hash key from uploaded files (name + size)."""
-    h = hashlib.md5()
-    for name, data in sorted(file_data, key=lambda x: x[0]):
-        h.update(name.encode())
-        h.update(str(len(data)).encode())
-    return h.hexdigest()
+# ── Background runner ────────────────────────────────────────────────────────
+# Runs the entire pipeline in a thread that Streamlit reruns CANNOT kill.
+# Results are stored in a module-level dict (survives reruns, shared across
+# script executions within the same server process).
+
+_pipeline_state = {}  # module-level, survives reruns
 
 
-# ── Cached pipeline steps ────────────────────────────────────────────────────
-# @st.cache_resource survives Streamlit reruns without re-executing.
-# The _file_data arg (underscore prefix) is NOT hashed — we use file_hash instead.
+def _run_pipeline_thread(run_id, file_data):
+    """Execute the full pipeline in a background thread."""
+    state = _pipeline_state[run_id]
+    try:
+        # Step 1
+        state["status"] = "Step 1: Classifying documents..."
+        t0 = time.time()
+        classification = classify_documents(file_data)
+        state["step1_time"] = time.time() - t0
+        state["step1_done"] = True
+        logger.info(f"Step 1 done in {state['step1_time']:.0f}s")
 
-@st.cache_resource(show_spinner="Step 1: Classifying documents...")
-def run_step1(file_hash, _file_data):
-    logger.info(f"Step 1 START (hash={file_hash})")
-    result = classify_documents(_file_data)
-    logger.info("Step 1 DONE")
-    return result
+        # Step 2a
+        state["status"] = "Step 2a: Sheet index + table extraction..."
+        t0 = time.time()
+        sheets = build_sheet_index(classification)
+        tables = extract_tables_from_sheets(sheets, classification)
+        rows = tables_to_schedule_rows(tables)
+        state["step2a_time"] = time.time() - t0
+        state["step2a_done"] = True
+        state["n_sheets"] = len(sheets)
+        state["n_tables"] = len(tables)
+        logger.info(f"Step 2a done in {state['step2a_time']:.0f}s")
 
+        # Step 2d
+        state["status"] = "Step 2d: Reading drawings (Gemini Pro)..."
+        t0 = time.time()
+        drawing_items = read_drawings(classification, sheets, tables)
+        state["step2d_time"] = time.time() - t0
+        state["step2d_done"] = True
+        state["n_drawing_items"] = len(drawing_items)
+        logger.info(f"Step 2d done in {state['step2d_time']:.0f}s")
 
-@st.cache_resource(show_spinner="Step 2a: Sheet index + table extraction...")
-def run_step2a(file_hash, _classification):
-    logger.info("Step 2a START")
-    sheets = build_sheet_index(_classification)
-    tables = extract_tables_from_sheets(sheets, _classification)
-    rows = tables_to_schedule_rows(tables)
-    logger.info(f"Step 2a DONE: {len(sheets)} sheets, {len(tables)} tables")
-    return sheets, tables, rows
+        # Step 3
+        state["status"] = "Step 3: Vision quantification..."
+        t0 = time.time()
+        final_items = quantify_items(drawing_items, classification, sheets)
+        state["step3_time"] = time.time() - t0
+        state["step3_done"] = True
+        logger.info(f"Step 3 done in {state['step3_time']:.0f}s")
 
+        state["final_items"] = final_items
+        state["status"] = "complete"
 
-@st.cache_resource(show_spinner="Step 2d: Reading drawings (Gemini Pro)...")
-def run_step2d(file_hash, _classification, _sheets, _tables):
-    logger.info("Step 2d START")
-    items = read_drawings(_classification, _sheets, _tables)
-    logger.info(f"Step 2d DONE: {len(items)} items")
-    return items
-
-
-@st.cache_resource(show_spinner="Step 3: Vision quantification...")
-def run_step3(file_hash, _drawing_items, _classification, _sheets):
-    logger.info("Step 3 START")
-    items = quantify_items(_drawing_items, _classification, _sheets)
-    logger.info(f"Step 3 DONE: {len(items)} items")
-    return items
+    except Exception as e:
+        state["status"] = "error"
+        state["error"] = str(e)
+        state["traceback"] = traceback.format_exc()
+        logger.error(f"Pipeline failed: {e}")
 
 
 # ── Session state ────────────────────────────────────────────────────────────
-if "started" not in st.session_state:
-    st.session_state.started = False
+if "run_id" not in st.session_state:
+    st.session_state.run_id = None
     st.session_state.file_data = None
 
 
 def on_run():
     files = st.session_state.get("uploader")
     if files:
-        st.session_state.started = True
-        st.session_state.file_data = [(f.name, f.read()) for f in files]
+        file_data = [(f.name, f.read()) for f in files]
+        run_id = f"run_{id(file_data)}_{time.time()}"
+
+        # Initialize state and start background thread
+        _pipeline_state[run_id] = {
+            "status": "starting",
+            "step1_done": False, "step2a_done": False,
+            "step2d_done": False, "step3_done": False,
+        }
+        thread = threading.Thread(
+            target=_run_pipeline_thread,
+            args=(run_id, file_data),
+            daemon=True,
+        )
+        thread.start()
+
+        st.session_state.run_id = run_id
+        st.session_state.file_data = file_data
 
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
@@ -98,43 +130,28 @@ with st.sidebar:
     st.button("Run Pipeline", type="primary", on_click=on_run,
               disabled=not st.session_state.get("uploader"))
 
-# ── Pipeline ─────────────────────────────────────────────────────────────────
-if st.session_state.started and st.session_state.file_data:
-    file_data = st.session_state.file_data
-    fhash = _file_data_hash(file_data)
+# ── Pipeline progress / results ──────────────────────────────────────────────
+run_id = st.session_state.run_id
+if run_id and run_id in _pipeline_state:
+    state = _pipeline_state[run_id]
+    status = state["status"]
 
-    try:
-        t_total = time.time()
+    if status == "error":
+        st.error(f"Pipeline failed: {state['error']}")
+        st.code(state["traceback"])
+        st.session_state.run_id = None
 
-        # Step 1
-        t0 = time.time()
-        classification = run_step1(fhash, file_data)
-        t1 = time.time() - t0
-        st.success(f"Step 1: Classification ({t1:.0f}s)")
-
-        # Step 2a
-        t0 = time.time()
-        sheets, tables, rows = run_step2a(fhash, classification)
-        t2a = time.time() - t0
-        st.success(f"Step 2a: {len(sheets)} sheets, {len(tables)} tables ({t2a:.0f}s)")
-
-        # Step 2d
-        t0 = time.time()
-        drawing_items = run_step2d(fhash, classification, sheets, tables)
-        t2d = time.time() - t0
-        st.success(f"Step 2d: {len(drawing_items)} items ({t2d:.0f}s)")
-
-        # Step 3
-        t0 = time.time()
-        final_items = run_step3(fhash, drawing_items, classification, sheets)
-        t3 = time.time() - t0
-        st.success(f"Step 3: Vision done ({t3:.0f}s)")
-
-        total = time.time() - t_total
+    elif status == "complete":
+        # Show completed step timings
+        st.success(f"Step 1: Classification ({state['step1_time']:.0f}s)")
+        st.success(f"Step 2a: {state['n_sheets']} sheets, {state['n_tables']} tables ({state['step2a_time']:.0f}s)")
+        st.success(f"Step 2d: {state['n_drawing_items']} items ({state['step2d_time']:.0f}s)")
+        st.success(f"Step 3: Vision done ({state['step3_time']:.0f}s)")
+        total = state["step1_time"] + state["step2a_time"] + state["step2d_time"] + state["step3_time"]
         st.success(f"Pipeline complete! Total: {total:.0f}s")
-        st.session_state.started = False
 
-        # ── Results ──────────────────────────────────────────────────────────
+        # Results
+        final_items = state["final_items"]
         st.divider()
         n_total = len(final_items)
         n_qty = sum(1 for i in final_items if i.qty is not None)
@@ -152,7 +169,22 @@ if st.session_state.started and st.session_state.file_data:
             for i in final_items
         ]), use_container_width=True, hide_index=True, height=600)
 
-    except Exception as e:
-        st.session_state.started = False
-        st.error(f"Pipeline failed: {e}")
-        st.code(traceback.format_exc())
+        # Clean up
+        st.session_state.run_id = None
+
+    else:
+        # Still running — show progress
+        if state.get("step1_done"):
+            st.success(f"Step 1: Classification ({state['step1_time']:.0f}s)")
+        if state.get("step2a_done"):
+            st.success(f"Step 2a: {state['n_sheets']} sheets, {state['n_tables']} tables ({state['step2a_time']:.0f}s)")
+        if state.get("step2d_done"):
+            st.success(f"Step 2d: {state['n_drawing_items']} items ({state['step2d_time']:.0f}s)")
+
+        # Show current step spinner
+        st.spinner(status)
+        st.info(f"Running: {status}")
+
+        # Auto-refresh every 3 seconds to poll for updates
+        time.sleep(3)
+        st.rerun()
