@@ -18,9 +18,18 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY streamlit_app.py .
 COPY app/ ./app/
 
-EXPOSE 8501
+# Cloud Run uses PORT env var (default 8080)
+ENV PORT=8080
+EXPOSE ${PORT}
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')" || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:${PORT}/_stcore/health')" || exit 1
 
-CMD ["streamlit", "run", "streamlit_app.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true", "--server.enableXsrfProtection=false", "--server.enableCORS=false", "--server.maxUploadSize=500", "--server.maxMessageSize=500"]
+CMD streamlit run streamlit_app.py \
+    --server.port=${PORT} \
+    --server.address=0.0.0.0 \
+    --server.headless=true \
+    --server.enableXsrfProtection=false \
+    --server.enableCORS=false \
+    --server.maxUploadSize=500 \
+    --server.maxMessageSize=500
