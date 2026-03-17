@@ -618,6 +618,7 @@ def render_drawing_images(
     """Render images ONLY for pages flagged as drawings (in-place).
 
     Called after classification so we skip the 230 spec pages entirely.
+    Uses parallel threads for speed (PyMuPDF releases GIL during rendering).
     """
     zoom = DRAWING_DPI / 72
     for cf in files:
@@ -631,13 +632,20 @@ def render_drawing_images(
         if not drawing_pages:
             continue
 
-        logger.info(f"Rendering {len(drawing_pages)} drawing page images for {cf.filename}")
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        for p in drawing_pages:
-            if p.page_number < len(doc):
-                pix = doc[p.page_number].get_pixmap(matrix=fitz.Matrix(zoom, zoom))
-                p.image_bytes = pix.tobytes("jpeg", 85)
-        doc.close()
+        logger.info(f"Rendering {len(drawing_pages)} drawing page images for {cf.filename} (parallel)")
+
+        def _render_one(page_info):
+            # Each thread opens its own doc (PyMuPDF is not thread-safe)
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            if page_info.page_number < len(doc):
+                pix = doc[page_info.page_number].get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+                page_info.image_bytes = pix.tobytes("jpeg", 85)
+            doc.close()
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            executor.map(_render_one, drawing_pages)
+
+        logger.info(f"  Rendered {len(drawing_pages)} pages")
 
 
 def _parse_classification_response(

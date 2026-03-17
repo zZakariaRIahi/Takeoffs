@@ -64,30 +64,33 @@ SCALE = CROP_DPI / RENDER_DPI  # 2.0
 MIN_CROP_W = 100
 MIN_CROP_H = 50
 
-EXTRACTION_PROMPT = """You are extracting a construction schedule/table from a drawing page.
+EXTRACTION_PROMPT = """You are extracting construction schedules/tables from a drawing page.
 
-Look at this cropped table image and extract ALL data as structured JSON.
+Look at ALL the table/schedule images below and extract ALL data as structured JSON.
 
-Return a JSON object with:
-{
-  "table_title": "Name of the schedule (e.g. 'Door Schedule', 'Finish Schedule')",
-  "schedule_type": "one of: door, window, finish, fixture, equipment, panel, lighting, hardware, ventilation, mechanical, plumbing_fixture, other",
-  "headers": ["col1", "col2", ...],
-  "rows": [
-    {"col1": "val1", "col2": "val2", ...},
-    ...
-  ]
-}
+Return a JSON ARRAY where each element is one table:
+[
+  {
+    "table_title": "Name of the schedule (e.g. 'Door Schedule', 'Finish Schedule')",
+    "schedule_type": "one of: door, window, finish, fixture, equipment, panel, lighting, hardware, ventilation, mechanical, plumbing_fixture, other",
+    "headers": ["col1", "col2", ...],
+    "rows": [
+      {"col1": "val1", "col2": "val2", ...}
+    ]
+  }
+]
 
 Rules:
-- Extract EVERY row, not just examples
+- Extract EVERY row from EVERY table — do NOT skip any rows or tables
 - Use exact header names from the table
 - If a cell is empty, use ""
-- If the image contains multiple sub-tables, return a JSON array of table objects
 - For merged cells spanning multiple rows, repeat the value in each row
 - Numbers should be strings (preserve original formatting)
+- If an image contains multiple sub-tables, include each as a separate object
+- If an image does NOT contain a table (just a drawing detail or noise), skip it — return nothing for that image
+- But NEVER skip an actual table or schedule
 
-Return ONLY valid JSON, no markdown fences."""
+Return ONLY valid JSON array, no markdown fences."""
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -118,12 +121,12 @@ def _image_to_jpeg_bytes(img: Image.Image, max_dim: int = 4000, quality: int = 9
 # LLM extraction
 # ════════════════════════════════════════════════════════════════════════════════
 
-def _extract_table_with_llm(client, img_bytes: bytes) -> str:
-    """Send table crop to Gemini Flash and get structured JSON back."""
-    contents = [
-        EXTRACTION_PROMPT,
-        genai_types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"),
-    ]
+def _extract_tables_with_llm(client, crop_images: List[bytes]) -> str:
+    """Send all table crops from a page to Gemini Flash in ONE call."""
+    contents = [EXTRACTION_PROMPT]
+    for i, img_bytes in enumerate(crop_images):
+        contents.append(f"--- Table region {i+1} ---")
+        contents.append(genai_types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"))
     response = client.models.generate_content(
         model="gemini-2.5-flash",
         contents=contents,
@@ -365,43 +368,30 @@ def _extract_tables_from_page(
         f"{len(detected)} detected, {len(valid_crops)} valid regions ({detect_time:.1f}s)"
     )
 
-    # Step 4: Render at 300 DPI for high-quality crops
+    # Step 4: Render at CROP_DPI for high-quality crops
     zoom_crop = CROP_DPI / 72.0
     pix_hd = page.get_pixmap(matrix=fitz.Matrix(zoom_crop, zoom_crop))
     hd_img = Image.open(io.BytesIO(pix_hd.tobytes("png")))
 
     # Prepare all crops
-    crop_jobs = []
+    all_crop_images = []
     for ti, table, crop_w, crop_h in valid_crops:
         cropped = _crop_table_region(hd_img, table.bbox)
         jpeg_bytes = _image_to_jpeg_bytes(cropped)
-        crop_jobs.append((ti, crop_w, crop_h, jpeg_bytes))
+        all_crop_images.append(jpeg_bytes)
 
-    # Step 5: Send all crops to Gemini Flash in parallel
-    def _process_crop(args):
-        ti, crop_w, crop_h, jpeg_bytes = args
-        t0 = time.time()
-        raw_response = _extract_table_with_llm(client, jpeg_bytes)
-        llm_time = time.time() - t0
-        parsed = _parse_llm_response(raw_response)
-        page_tables = _llm_result_to_tables(
-            parsed, sheet.global_page_number, sheet.sheet_id
-        )
-        logger.info(
-            f"    Table {ti+1}: {crop_w}x{crop_h}px → "
-            f"{len(page_tables)} schedules ({llm_time:.1f}s)"
-        )
-        return page_tables
-
-    with ThreadPoolExecutor(max_workers=min(len(crop_jobs), 4)) as crop_executor:
-        crop_futures = {crop_executor.submit(_process_crop, job): job for job in crop_jobs}
-        for future in as_completed(crop_futures):
-            try:
-                page_tables = future.result()
-                tables.extend(page_tables)
-            except Exception as e:
-                job = crop_futures[future]
-                logger.error(f"    Table {job[0]+1}: LLM error: {e}")
+    # Step 5: Send ALL crops in ONE Gemini call (not one per crop)
+    t0 = time.time()
+    raw_response = _extract_tables_with_llm(client, all_crop_images)
+    llm_time = time.time() - t0
+    parsed = _parse_llm_response(raw_response)
+    page_tables = _llm_result_to_tables(
+        parsed, sheet.global_page_number, sheet.sheet_id
+    )
+    logger.info(
+        f"    {len(valid_crops)} crops → {len(page_tables)} schedules ({llm_time:.1f}s)"
+    )
+    tables.extend(page_tables)
 
     return tables
 
