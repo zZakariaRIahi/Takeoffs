@@ -16,8 +16,7 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 from app.agents.document_classifier_agent import classify_documents
-from app.extractors.sheet_indexer import build_sheet_index
-from app.extractors.table_extractor import extract_tables_from_sheets, tables_to_schedule_rows
+from app.extractors.table_extractor import extract_sheets_and_tables
 from app.extractors.drawing_reader import read_drawings
 from app.extractors.vision_quantifier import quantify_items
 
@@ -88,9 +87,7 @@ def _run_pipeline(file_data: List[Tuple[str, bytes]]):
         # Step 2a
         _state["step_label"] = "Step 2a: Sheet index + table extraction..."
         t0 = time.time()
-        sheets = build_sheet_index(classification)
-        tables = extract_tables_from_sheets(sheets, classification)
-        rows = tables_to_schedule_rows(tables)
+        sheets, tables, rows = extract_sheets_and_tables(classification)
         _state["step2a_time"] = time.time() - t0
         _state["step2a_done"] = True
         _state["n_sheets"] = len(sheets)
