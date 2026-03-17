@@ -1,5 +1,5 @@
 """Streamlit UI — QTO Pipeline."""
-import logging, os, sys, time, traceback
+import hashlib, logging, os, sys, time, traceback
 import streamlit as st
 import pandas as pd
 
@@ -12,7 +12,6 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 # On Streamlit Cloud, secrets come from st.secrets, not .env
-# Bridge them into os.environ so downstream code can find them
 for key in ("GOOGLE_API_KEY", "OPENAI_API_KEY"):
     if not os.environ.get(key):
         try:
@@ -29,33 +28,68 @@ from app.extractors.vision_quantifier import quantify_items
 st.set_page_config(page_title="QTO Pipeline", layout="wide")
 st.title("Construction QTO Pipeline")
 logging.basicConfig(level=logging.INFO, format="[%(name)s] %(message)s")
+logger = logging.getLogger(__name__)
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+def _file_data_hash(file_data):
+    """Create a stable hash key from uploaded files (name + size)."""
+    h = hashlib.md5()
+    for name, data in sorted(file_data, key=lambda x: x[0]):
+        h.update(name.encode())
+        h.update(str(len(data)).encode())
+    return h.hexdigest()
+
+
+# ── Cached pipeline steps ────────────────────────────────────────────────────
+# @st.cache_resource survives Streamlit reruns without re-executing.
+# The _file_data arg (underscore prefix) is NOT hashed — we use file_hash instead.
+
+@st.cache_resource(show_spinner="Step 1: Classifying documents...")
+def run_step1(file_hash, _file_data):
+    logger.info(f"Step 1 START (hash={file_hash})")
+    result = classify_documents(_file_data)
+    logger.info("Step 1 DONE")
+    return result
+
+
+@st.cache_resource(show_spinner="Step 2a: Sheet index + table extraction...")
+def run_step2a(file_hash, _classification):
+    logger.info("Step 2a START")
+    sheets = build_sheet_index(_classification)
+    tables = extract_tables_from_sheets(sheets, _classification)
+    rows = tables_to_schedule_rows(tables)
+    logger.info(f"Step 2a DONE: {len(sheets)} sheets, {len(tables)} tables")
+    return sheets, tables, rows
+
+
+@st.cache_resource(show_spinner="Step 2d: Reading drawings (Gemini Pro)...")
+def run_step2d(file_hash, _classification, _sheets, _tables):
+    logger.info("Step 2d START")
+    items = read_drawings(_classification, _sheets, _tables)
+    logger.info(f"Step 2d DONE: {len(items)} items")
+    return items
+
+
+@st.cache_resource(show_spinner="Step 3: Vision quantification...")
+def run_step3(file_hash, _drawing_items, _classification, _sheets):
+    logger.info("Step 3 START")
+    items = quantify_items(_drawing_items, _classification, _sheets)
+    logger.info(f"Step 3 DONE: {len(items)} items")
+    return items
+
 
 # ── Session state ────────────────────────────────────────────────────────────
-for _k, _v in [
-    ("started", False),
-    ("file_data", None),
-    ("step1_result", None),
-    ("step2a_result", None),
-    ("step2d_result", None),
-    ("step3_result", None),
-    ("pipeline_error", None),
-]:
-    if _k not in st.session_state:
-        st.session_state[_k] = _v
+if "started" not in st.session_state:
+    st.session_state.started = False
+    st.session_state.file_data = None
 
 
 def on_run():
-    """Callback — runs BEFORE the page reruns (Streamlit guarantee)."""
     files = st.session_state.get("uploader")
     if files:
         st.session_state.started = True
         st.session_state.file_data = [(f.name, f.read()) for f in files]
-        # Clear previous results
-        st.session_state.step1_result = None
-        st.session_state.step2a_result = None
-        st.session_state.step2d_result = None
-        st.session_state.step3_result = None
-        st.session_state.pipeline_error = None
 
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
@@ -67,61 +101,37 @@ with st.sidebar:
 # ── Pipeline ─────────────────────────────────────────────────────────────────
 if st.session_state.started and st.session_state.file_data:
     file_data = st.session_state.file_data
-    status = st.status("Running pipeline...", expanded=True)
+    fhash = _file_data_hash(file_data)
 
     try:
-        # Step 1 — use cached result if available (survives reruns)
-        if st.session_state.step1_result is not None:
-            classification = st.session_state.step1_result
-            status.write("Step 1: Classification (cached)")
-        else:
-            status.write("Step 1: Classifying documents...")
-            t0 = time.time()
-            classification = classify_documents(file_data)
-            t1 = time.time() - t0
-            st.session_state.step1_result = classification
-            status.write(f"Step 1: Classification done ({t1:.0f}s)")
+        t_total = time.time()
+
+        # Step 1
+        t0 = time.time()
+        classification = run_step1(fhash, file_data)
+        t1 = time.time() - t0
+        st.success(f"Step 1: Classification ({t1:.0f}s)")
 
         # Step 2a
-        if st.session_state.step2a_result is not None:
-            sheets, tables, rows = st.session_state.step2a_result
-            status.write("Step 2a: Sheet index + tables (cached)")
-        else:
-            status.write("Step 2a: Sheet index + table extraction...")
-            t0 = time.time()
-            sheets = build_sheet_index(classification)
-            status.write(f"  Built {len(sheets)} sheets, extracting tables...")
-            tables = extract_tables_from_sheets(sheets, classification)
-            rows = tables_to_schedule_rows(tables)
-            t2a = time.time() - t0
-            st.session_state.step2a_result = (sheets, tables, rows)
-            status.write(f"Step 2a: {len(sheets)} sheets, {len(tables)} tables ({t2a:.0f}s)")
+        t0 = time.time()
+        sheets, tables, rows = run_step2a(fhash, classification)
+        t2a = time.time() - t0
+        st.success(f"Step 2a: {len(sheets)} sheets, {len(tables)} tables ({t2a:.0f}s)")
 
         # Step 2d
-        if st.session_state.step2d_result is not None:
-            drawing_items = st.session_state.step2d_result
-            status.write("Step 2d: Drawing reading (cached)")
-        else:
-            status.write("Step 2d: Reading drawings (Gemini Pro)...")
-            t0 = time.time()
-            drawing_items = read_drawings(classification, sheets, tables)
-            t2d = time.time() - t0
-            st.session_state.step2d_result = drawing_items
-            status.write(f"Step 2d: {len(drawing_items)} items ({t2d:.0f}s)")
+        t0 = time.time()
+        drawing_items = run_step2d(fhash, classification, sheets, tables)
+        t2d = time.time() - t0
+        st.success(f"Step 2d: {len(drawing_items)} items ({t2d:.0f}s)")
 
         # Step 3
-        if st.session_state.step3_result is not None:
-            final_items = st.session_state.step3_result
-            status.write("Step 3: Vision quantification (cached)")
-        else:
-            status.write("Step 3: Vision quantification...")
-            t0 = time.time()
-            final_items = quantify_items(drawing_items, classification, sheets)
-            t3 = time.time() - t0
-            st.session_state.step3_result = final_items
-            status.write(f"Step 3: Vision done ({t3:.0f}s)")
+        t0 = time.time()
+        final_items = run_step3(fhash, drawing_items, classification, sheets)
+        t3 = time.time() - t0
+        st.success(f"Step 3: Vision done ({t3:.0f}s)")
 
-        status.update(label="Pipeline complete!", state="complete", expanded=False)
+        total = time.time() - t_total
+        st.success(f"Pipeline complete! Total: {total:.0f}s")
         st.session_state.started = False
 
         # ── Results ──────────────────────────────────────────────────────────
@@ -144,12 +154,5 @@ if st.session_state.started and st.session_state.file_data:
 
     except Exception as e:
         st.session_state.started = False
-        st.session_state.pipeline_error = traceback.format_exc()
-        status.update(label="Pipeline failed!", state="error")
         st.error(f"Pipeline failed: {e}")
-        st.code(st.session_state.pipeline_error)
-
-# Show error from previous run if any
-elif st.session_state.pipeline_error:
-    st.error("Last pipeline run failed:")
-    st.code(st.session_state.pipeline_error)
+        st.code(traceback.format_exc())
