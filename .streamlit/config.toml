@@ -1,0 +1,11 @@
+[server]
+# Keep websocket alive during long pipeline runs
+enableWebsocketCompression = false
+pingTimeout = 300
+enableXsrfProtection = false
+enableCORS = false
+maxUploadSize = 500
+maxMessageSize = 500
+
+[browser]
+gatherUsageStats = false

@@ -17,6 +17,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copy application code
 COPY streamlit_app.py .
 COPY app/ ./app/
+COPY .streamlit/ ./.streamlit/
 
 # Cloud Run uses PORT env var (default 8080)
 ENV PORT=8080
