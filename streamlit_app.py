@@ -1,5 +1,5 @@
 """Streamlit UI — QTO Pipeline."""
-import logging, os, sys, time
+import logging, os, sys, time, traceback
 import streamlit as st
 import pandas as pd
 
@@ -31,9 +31,17 @@ st.title("Construction QTO Pipeline")
 logging.basicConfig(level=logging.INFO, format="[%(name)s] %(message)s")
 
 # ── Session state ────────────────────────────────────────────────────────────
-if "started" not in st.session_state:
-    st.session_state.started = False
-    st.session_state.file_data = None
+for _k, _v in [
+    ("started", False),
+    ("file_data", None),
+    ("step1_result", None),
+    ("step2a_result", None),
+    ("step2d_result", None),
+    ("step3_result", None),
+    ("pipeline_error", None),
+]:
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
 
 
 def on_run():
@@ -42,6 +50,12 @@ def on_run():
     if files:
         st.session_state.started = True
         st.session_state.file_data = [(f.name, f.read()) for f in files]
+        # Clear previous results
+        st.session_state.step1_result = None
+        st.session_state.step2a_result = None
+        st.session_state.step2d_result = None
+        st.session_state.step3_result = None
+        st.session_state.pipeline_error = None
 
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
@@ -53,40 +67,61 @@ with st.sidebar:
 # ── Pipeline ─────────────────────────────────────────────────────────────────
 if st.session_state.started and st.session_state.file_data:
     file_data = st.session_state.file_data
+    status = st.status("Running pipeline...", expanded=True)
 
     try:
-        # Step 1
-        with st.spinner("Step 1: Classifying documents..."):
+        # Step 1 — use cached result if available (survives reruns)
+        if st.session_state.step1_result is not None:
+            classification = st.session_state.step1_result
+            status.write("Step 1: Classification (cached)")
+        else:
+            status.write("Step 1: Classifying documents...")
             t0 = time.time()
             classification = classify_documents(file_data)
             t1 = time.time() - t0
-        st.success(f"Step 1: Classification ({t1:.0f}s)")
+            st.session_state.step1_result = classification
+            status.write(f"Step 1: Classification done ({t1:.0f}s)")
 
         # Step 2a
-        with st.spinner("Step 2a: Sheet index + table extraction..."):
+        if st.session_state.step2a_result is not None:
+            sheets, tables, rows = st.session_state.step2a_result
+            status.write("Step 2a: Sheet index + tables (cached)")
+        else:
+            status.write("Step 2a: Sheet index + table extraction...")
             t0 = time.time()
             sheets = build_sheet_index(classification)
+            status.write(f"  Built {len(sheets)} sheets, extracting tables...")
             tables = extract_tables_from_sheets(sheets, classification)
             rows = tables_to_schedule_rows(tables)
             t2a = time.time() - t0
-        st.success(f"Step 2a: {len(sheets)} sheets, {len(tables)} tables ({t2a:.0f}s)")
+            st.session_state.step2a_result = (sheets, tables, rows)
+            status.write(f"Step 2a: {len(sheets)} sheets, {len(tables)} tables ({t2a:.0f}s)")
 
         # Step 2d
-        with st.spinner("Step 2d: Reading drawings (Gemini Pro)..."):
+        if st.session_state.step2d_result is not None:
+            drawing_items = st.session_state.step2d_result
+            status.write("Step 2d: Drawing reading (cached)")
+        else:
+            status.write("Step 2d: Reading drawings (Gemini Pro)...")
             t0 = time.time()
             drawing_items = read_drawings(classification, sheets, tables)
             t2d = time.time() - t0
-        st.success(f"Step 2d: {len(drawing_items)} items ({t2d:.0f}s)")
+            st.session_state.step2d_result = drawing_items
+            status.write(f"Step 2d: {len(drawing_items)} items ({t2d:.0f}s)")
 
         # Step 3
-        with st.spinner("Step 3: Vision quantification..."):
+        if st.session_state.step3_result is not None:
+            final_items = st.session_state.step3_result
+            status.write("Step 3: Vision quantification (cached)")
+        else:
+            status.write("Step 3: Vision quantification...")
             t0 = time.time()
             final_items = quantify_items(drawing_items, classification, sheets)
             t3 = time.time() - t0
-        st.success(f"Step 3: Vision done ({t3:.0f}s)")
+            st.session_state.step3_result = final_items
+            status.write(f"Step 3: Vision done ({t3:.0f}s)")
 
-        total = t1 + t2a + t2d + t3
-        st.success(f"Pipeline complete! Total: {total:.0f}s")
+        status.update(label="Pipeline complete!", state="complete", expanded=False)
         st.session_state.started = False
 
         # ── Results ──────────────────────────────────────────────────────────
@@ -109,5 +144,12 @@ if st.session_state.started and st.session_state.file_data:
 
     except Exception as e:
         st.session_state.started = False
+        st.session_state.pipeline_error = traceback.format_exc()
+        status.update(label="Pipeline failed!", state="error")
         st.error(f"Pipeline failed: {e}")
-        st.exception(e)
+        st.code(st.session_state.pipeline_error)
+
+# Show error from previous run if any
+elif st.session_state.pipeline_error:
+    st.error("Last pipeline run failed:")
+    st.code(st.session_state.pipeline_error)
