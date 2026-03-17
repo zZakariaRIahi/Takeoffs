@@ -312,7 +312,11 @@ def _classify_single_pdf_with_gemini(
         )
 
         logger.info(f"  Uploading & indexing {label}…")
+        indexing_start = time.time()
+        MAX_INDEXING_WAIT = 120  # 2 minutes max, then fall back to vision
         while not operation.done:
+            if time.time() - indexing_start > MAX_INDEXING_WAIT:
+                raise TimeoutError(f"Indexing timed out after {MAX_INDEXING_WAIT}s for {label}")
             time.sleep(3)
             operation = client.operations.get(operation)
         logger.info(f"  Indexing complete for {label}")
