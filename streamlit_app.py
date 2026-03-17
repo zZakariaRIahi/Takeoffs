@@ -181,8 +181,7 @@ if run_id and run_id in _pipeline_state:
         if state.get("step2d_done"):
             st.success(f"Step 2d: {state['n_drawing_items']} items ({state['step2d_time']:.0f}s)")
 
-        # Show current step spinner
-        st.spinner(status)
+        # Show current step
         st.info(f"Running: {status}")
 
         # Auto-refresh every 3 seconds to poll for updates

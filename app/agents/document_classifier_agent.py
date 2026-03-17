@@ -194,7 +194,7 @@ def classify_file_with_gemini(
             f"Classifying {cf.filename} ({total} pages, {file_size/1024/1024:.1f} MB) "
             f"with vision (too large for File Search)"
         )
-        cats, drawing_pages = _classify_with_vision(cf, cf.filename)
+        cats, drawing_pages = _classify_with_vision(cf, cf.filename, raw_pdf_bytes=file_bytes)
     elif is_pdf and total > MAX_PAGES_FOR_SINGLE_UPLOAD:
         logger.info(f"Classifying {cf.filename} ({total} pages) with Gemini File Search…")
         # Split PDF into 3 equal sub-PDFs, classify each chunk separately
@@ -234,7 +234,7 @@ def classify_file_with_gemini(
         )
 
     if not cats:
-        cats, drawing_pages = _classify_with_vision(cf, cf.filename)
+        cats, drawing_pages = _classify_with_vision(cf, cf.filename, raw_pdf_bytes=file_bytes)
     if not cats:
         cats = _fallback_classify(cf)
         # Fallback: if filename says "drawing", flag all pages
@@ -354,14 +354,31 @@ def _classify_single_pdf_with_gemini(
 def _classify_with_vision(
     cf: ClassifiedFile,
     label: str,
+    raw_pdf_bytes: Optional[bytes] = None,
 ) -> Tuple[Set[DocumentCategory], List[int]]:
     """Fallback: classify by sending sampled page images to Gemini vision.
 
     Used when File Search upload fails (e.g., large files hitting 503/400).
     Samples up to MAX_VISION_PAGES evenly across the document.
+    Renders images on-the-fly for sampled pages if not already rendered.
     Returns (categories, drawing_page_numbers).
     """
+    # Render images on-the-fly for sampled pages if needed
     pages_with_images = [p for p in cf.pages if p.image_bytes]
+    if not pages_with_images and raw_pdf_bytes and cf.filename.lower().endswith(".pdf"):
+        # Pick sample indices first, then render only those
+        total = len(cf.pages)
+        n_sample = min(total, MAX_VISION_PAGES)
+        sample_indices = [int(i * total / n_sample) for i in range(n_sample)]
+        zoom = DRAWING_DPI / 72
+        doc = fitz.open(stream=raw_pdf_bytes, filetype="pdf")
+        for idx in sample_indices:
+            if idx < len(doc) and idx < len(cf.pages):
+                pix = doc[idx].get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+                cf.pages[idx].image_bytes = pix.tobytes("jpeg", 85)
+        doc.close()
+        pages_with_images = [p for p in cf.pages if p.image_bytes]
+
     if not pages_with_images:
         return set(), []
 
@@ -458,6 +475,9 @@ def classify_documents(
         else:
             logger.info(f"  {cf.filename}: 0 drawing pages")
 
+    # Render images only for drawing pages (not all 270 pages)
+    render_drawing_images(files, raw_bytes_map)
+
     result = DocumentClassificationResult(
         files=files,
         raw_pdf_bytes=raw_bytes_map,
@@ -475,31 +495,54 @@ def _process_pdf(
     filename: str,
     global_offset: int,
 ) -> Tuple[List[PageInfo], int]:
-    """Extract text and render images for every page of a PDF."""
+    """Extract text per page. Images are NOT rendered here to save memory.
+
+    The raw PDFs are sent directly to Gemini File Search for classification.
+    After classification, render_drawing_images() renders images only for
+    pages flagged as drawings (~40 pages instead of all 270).
+    """
     doc = fitz.open(stream=content, filetype="pdf")
     pages: List[PageInfo] = []
 
     for i in range(len(doc)):
-        page = doc[i]
-
-        # Text extraction
-        text = page.get_text("text") or ""
-
-        # Render image at DRAWING_DPI for all pages
-        # (has_drawings is set later from file-level classification)
-        zoom = DRAWING_DPI / 72
-        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
-        img_bytes = pix.tobytes("jpeg", 85)
-
+        text = doc[i].get_text("text") or ""
         pages.append(PageInfo(
             page_number=i,
             global_page_number=global_offset + i,
             extracted_text=text,
-            image_bytes=img_bytes,
         ))
 
     doc.close()
     return pages, global_offset + len(pages)
+
+
+def render_drawing_images(
+    files: List[ClassifiedFile],
+    raw_pdf_bytes: dict,
+) -> None:
+    """Render images ONLY for pages flagged as drawings (in-place).
+
+    Called after classification so we skip the 230 spec pages entirely.
+    """
+    zoom = DRAWING_DPI / 72
+    for cf in files:
+        if not cf.filename.lower().endswith(".pdf"):
+            continue
+        pdf_bytes = raw_pdf_bytes.get(cf.filename)
+        if not pdf_bytes:
+            continue
+
+        drawing_pages = [p for p in cf.pages if p.has_drawings]
+        if not drawing_pages:
+            continue
+
+        logger.info(f"Rendering {len(drawing_pages)} drawing page images for {cf.filename}")
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        for p in drawing_pages:
+            if p.page_number < len(doc):
+                pix = doc[p.page_number].get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+                p.image_bytes = pix.tobytes("jpeg", 85)
+        doc.close()
 
 
 def _parse_classification_response(
