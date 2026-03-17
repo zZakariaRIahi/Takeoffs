@@ -1,0 +1,23 @@
+# Streamlit UI
+streamlit>=1.37.0
+
+# Data display
+pandas>=2.0.0
+
+# Google AI (Gemini)
+google-genai>=1.0.0
+
+# PDF processing
+PyMuPDF>=1.23.0
+Pillow>=10.0.0
+
+# Table detection (img2table + Tesseract OCR)
+img2table>=1.3.0
+
+# Settings & config
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+python-dotenv>=1.0.0
+
+# HTTP client (required by google-genai)
+httpx>=0.26.0
