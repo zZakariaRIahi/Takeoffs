@@ -56,8 +56,8 @@ logger = logging.getLogger(__name__)
 # Constants
 # ════════════════════════════════════════════════════════════════════════════════
 
-RENDER_DPI = 150   # For img2table bbox detection
-CROP_DPI = 300     # For high-quality LLM crops
+RENDER_DPI = 100   # For img2table bbox detection (lower = less memory)
+CROP_DPI = 200     # For LLM crops (200 is sufficient for Gemini)
 SCALE = CROP_DPI / RENDER_DPI  # 2.0
 
 # Minimum crop dimensions at CROP_DPI to skip noise

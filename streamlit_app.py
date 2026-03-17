@@ -120,6 +120,7 @@ def on_run():
     _pipeline_state.update({
         "status": "running",
         "run_id": run_id,
+        "start_time": time.time(),
         "step_label": "Starting...",
         "step1_done": False, "step2a_done": False,
         "step2d_done": False, "step3_done": False,
@@ -186,6 +187,18 @@ elif status == "complete":
     ]), use_container_width=True, hide_index=True, height=600)
 
 elif status == "running":
+    # Count completed steps for progress bar
+    done = sum([
+        _pipeline_state.get("step1_done", False),
+        _pipeline_state.get("step2a_done", False),
+        _pipeline_state.get("step2d_done", False),
+        _pipeline_state.get("step3_done", False),
+    ])
+    elapsed = int(time.time() - _pipeline_state.get("start_time", time.time()))
+
+    st.warning(f"Pipeline running... ({elapsed}s elapsed)")
+    st.progress(done / 4, text=_pipeline_state.get("step_label", "Starting..."))
+
     # Show completed steps
     if _pipeline_state.get("step1_done"):
         st.success(f"Step 1: Classification ({_pipeline_state['step1_time']:.0f}s)")
@@ -193,8 +206,6 @@ elif status == "running":
         st.success(f"Step 2a: {_pipeline_state['n_sheets']} sheets, {_pipeline_state['n_tables']} tables ({_pipeline_state['step2a_time']:.0f}s)")
     if _pipeline_state.get("step2d_done"):
         st.success(f"Step 2d: {_pipeline_state['n_drawing_items']} items ({_pipeline_state['step2d_time']:.0f}s)")
-
-    st.info(f"Running: {_pipeline_state.get('step_label', '...')}")
 
     # Poll every 3 seconds
     time.sleep(3)

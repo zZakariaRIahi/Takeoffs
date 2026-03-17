@@ -5,9 +5,8 @@ Pipeline:
   2. classify_file_with_gemini()   — upload PDF to Gemini File Search store,
                                      ask gemini-2.5-pro to classify into 8 categories.
                                      Gemini handles chunking/indexing internally — no token limits.
-     2b. _classify_with_vision()   — fallback if File Search upload fails (e.g. large files):
+     2b. _classify_with_vision()   — fallback if File Search / Files API fails:
                                      sends sampled page images to Gemini vision instead.
-     2c. _fallback_classify()      — last-resort keyword heuristic if both model paths fail.
   3. Post-classification           — set has_drawings flag per page based on model's
                                      drawing page identification (not all pages in file)
   4. Return DocumentClassificationResult ready for Steps 2-4
@@ -242,11 +241,6 @@ def classify_file_with_gemini(
 
     if not cats:
         cats, drawing_pages = _classify_with_vision(cf, cf.filename, raw_pdf_bytes=file_bytes)
-    if not cats:
-        cats = _fallback_classify(cf)
-        # Fallback: if filename says "drawing", flag all pages
-        if DocumentCategory.CONSTRUCTION_DRAWINGS in cats and not drawing_pages:
-            drawing_pages = list(range(1, total + 1))
 
     cf.categories = cats
     drawing_pages = sorted(set(drawing_pages))
@@ -724,37 +718,6 @@ def _parse_classification_response(
 
     return cats, sorted(set(drawing_pages))
 
-
-def _fallback_classify(cf: ClassifiedFile) -> Set[DocumentCategory]:
-    """Heuristic fallback if Gemini returns nothing."""
-    cats: Set[DocumentCategory] = set()
-    fn = cf.filename.lower()
-    all_text = " ".join(p.extracted_text[:500] for p in cf.pages[:20]).lower()
-
-    if "drawing" in fn or "dwg" in fn:
-        cats.add(DocumentCategory.CONSTRUCTION_DRAWINGS)
-    if "addendum" in fn:
-        cats.add(DocumentCategory.PROJECT_SPECIFICATIONS)
-    if "manual" in fn or "specification" in fn or "spec" in fn:
-        cats.add(DocumentCategory.PROJECT_SPECIFICATIONS)
-    if "bid" in fn and "form" in fn:
-        cats.add(DocumentCategory.BID_FORM)
-
-    if "general conditions" in all_text:
-        cats.add(DocumentCategory.GENERAL_CONDITIONS)
-    if "special conditions" in all_text:
-        cats.add(DocumentCategory.SPECIAL_CONDITIONS)
-    if "instructions to bidder" in all_text:
-        cats.add(DocumentCategory.INSTRUCTIONS_TO_BIDDER)
-    if "bid bond" in all_text or "bid security" in all_text:
-        cats.add(DocumentCategory.BID_SECURITY)
-    if "bid form" in all_text or "proposal form" in all_text:
-        cats.add(DocumentCategory.BID_FORM)
-
-    if not cats:
-        cats.add(DocumentCategory.PROJECT_SPECIFICATIONS)
-
-    return cats
 
 
 def _extract_zip(content: bytes, filename: str) -> List[Tuple[str, bytes]]:

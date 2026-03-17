@@ -49,7 +49,7 @@ Takeoffs/
 │  1. Ingest files (extract text only, no image rendering)│
 │  2. Upload raw PDFs to Gemini File Search → classify    │
 │     into 8 categories + identify drawing page numbers   │
-│  3. Fallback chain: File Search → Vision → Keywords     │
+│  3. Fallback chain: File Search/Files API → Vision       │
 │  4. Render images ONLY for drawing pages (200 DPI)      │
 │                                                         │
 │  Output: DocumentClassificationResult                   │
