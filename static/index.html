@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>QTO Pipeline</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f1117; color: #e0e0e0; padding: 2rem; }
+    h1 { font-size: 1.8rem; margin-bottom: 1.5rem; color: #fff; }
+    .card { background: #1a1d27; border-radius: 12px; padding: 1.5rem; margin-bottom: 1rem; }
+
+    /* Upload */
+    .upload-area { border: 2px dashed #444; border-radius: 12px; padding: 2rem; text-align: center; cursor: pointer; transition: border-color 0.2s; }
+    .upload-area:hover, .upload-area.dragover { border-color: #4a9eff; }
+    .upload-area input { display: none; }
+    .file-list { margin-top: 0.5rem; font-size: 0.85rem; color: #999; }
+    .btn { display: inline-block; padding: 0.7rem 2rem; border: none; border-radius: 8px; font-size: 1rem; cursor: pointer; font-weight: 600; transition: opacity 0.2s; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-primary { background: #4a9eff; color: #fff; margin-top: 1rem; }
+    .btn-primary:hover:not(:disabled) { background: #3a8eef; }
+    .btn-danger { background: #ff4a4a; color: #fff; margin-top: 0.5rem; font-size: 0.85rem; padding: 0.4rem 1rem; }
+
+    /* Progress */
+    #progress { display: none; }
+    .progress-bar-bg { background: #2a2d37; border-radius: 8px; height: 12px; overflow: hidden; margin: 1rem 0; }
+    .progress-bar-fill { background: #4a9eff; height: 100%; transition: width 0.5s ease; border-radius: 8px; }
+    .step { padding: 0.5rem 0.8rem; border-radius: 6px; margin: 0.3rem 0; font-size: 0.9rem; }
+    .step-done { background: #1a3a1a; color: #4caf50; }
+    .step-active { background: #1a2a3a; color: #4a9eff; }
+    .elapsed { font-size: 0.85rem; color: #999; margin-bottom: 0.5rem; }
+
+    /* Error */
+    #error { display: none; }
+    .error-box { background: #3a1a1a; color: #ff6b6b; border-radius: 8px; padding: 1rem; }
+    .error-box pre { font-size: 0.75rem; overflow-x: auto; margin-top: 0.5rem; color: #cc8888; }
+
+    /* Results */
+    #results { display: none; }
+    .metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-bottom: 1rem; }
+    .metric { background: #1a1d27; border-radius: 10px; padding: 1rem; text-align: center; }
+    .metric-value { font-size: 2rem; font-weight: 700; color: #fff; }
+    .metric-label { font-size: 0.8rem; color: #999; margin-top: 0.3rem; }
+    .summary { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+    .summary .step-done { font-size: 0.8rem; }
+
+    /* Table */
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    th { background: #2a2d37; text-align: left; padding: 0.6rem 0.8rem; position: sticky; top: 0; color: #ccc; }
+    td { padding: 0.5rem 0.8rem; border-bottom: 1px solid #2a2d37; }
+    tr:hover { background: #1e2130; }
+    .confidence-high { color: #4caf50; }
+    .confidence-med { color: #ffa726; }
+    .confidence-low { color: #ff5252; }
+  </style>
+</head>
+<body>
+
+<h1>Construction QTO Pipeline</h1>
+
+<!-- Upload -->
+<div id="upload" class="card">
+  <div class="upload-area" id="dropzone" onclick="document.getElementById('fileInput').click()">
+    <p style="font-size: 1.1rem; margin-bottom: 0.5rem;">Drop PDF files here or click to browse</p>
+    <p style="font-size: 0.85rem; color: #666;">Supports multiple PDFs (drawings + specifications)</p>
+    <input type="file" id="fileInput" accept=".pdf" multiple>
+    <div class="file-list" id="fileList"></div>
+  </div>
+  <button class="btn btn-primary" id="runBtn" disabled onclick="startPipeline()">Run Pipeline</button>
+</div>
+
+<!-- Progress -->
+<div id="progress" class="card">
+  <div class="elapsed" id="elapsed"></div>
+  <div class="progress-bar-bg"><div class="progress-bar-fill" id="progressBar" style="width: 0%"></div></div>
+  <div id="stepLabel" class="step step-active"></div>
+  <div id="completedSteps"></div>
+</div>
+
+<!-- Error -->
+<div id="error" class="card">
+  <div class="error-box">
+    <strong>Pipeline failed</strong>
+    <p id="errorMsg"></p>
+    <pre id="errorTrace"></pre>
+  </div>
+  <button class="btn btn-danger" onclick="resetPipeline()">Reset</button>
+</div>
+
+<!-- Results -->
+<div id="results">
+  <div class="summary" id="stepSummary"></div>
+  <div class="metrics">
+    <div class="metric"><div class="metric-value" id="mTotal">0</div><div class="metric-label">Total Items</div></div>
+    <div class="metric"><div class="metric-value" id="mQty">0</div><div class="metric-label">With Quantity</div></div>
+    <div class="metric"><div class="metric-value" id="mReview">0</div><div class="metric-label">Manual Review</div></div>
+  </div>
+  <div class="card table-wrap">
+    <table>
+      <thead>
+        <tr><th>Trade</th><th>Description</th><th>Qty</th><th>Unit</th><th>Mark</th><th>Confidence</th></tr>
+      </thead>
+      <tbody id="tableBody"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+let selectedFiles = [];
+let pollTimer = null;
+
+// ── File handling ──
+const dropzone = document.getElementById('dropzone');
+const fileInput = document.getElementById('fileInput');
+const fileList = document.getElementById('fileList');
+const runBtn = document.getElementById('runBtn');
+
+dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('dragover'); });
+dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
+dropzone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropzone.classList.remove('dragover');
+  handleFiles(e.dataTransfer.files);
+});
+fileInput.addEventListener('change', () => handleFiles(fileInput.files));
+
+function handleFiles(files) {
+  selectedFiles = Array.from(files).filter(f => f.name.endsWith('.pdf'));
+  fileList.textContent = selectedFiles.map(f => f.name).join(', ') || 'No PDFs selected';
+  runBtn.disabled = selectedFiles.length === 0;
+}
+
+// ── Pipeline ──
+async function startPipeline() {
+  if (selectedFiles.length === 0) return;
+  runBtn.disabled = true;
+
+  const formData = new FormData();
+  selectedFiles.forEach(f => formData.append('files', f));
+
+  try {
+    const resp = await fetch('/upload', { method: 'POST', body: formData });
+    const data = await resp.json();
+    if (resp.ok) {
+      show('progress');
+      hide('upload');
+      hide('results');
+      hide('error');
+      startPolling();
+    } else {
+      alert(data.error || 'Upload failed');
+      runBtn.disabled = false;
+    }
+  } catch (e) {
+    alert('Upload failed: ' + e.message);
+    runBtn.disabled = false;
+  }
+}
+
+function startPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(pollStatus, 3000);
+  pollStatus();
+}
+
+async function pollStatus() {
+  try {
+    const resp = await fetch('/status');
+    const s = await resp.json();
+
+    if (s.status === 'running') {
+      document.getElementById('elapsed').textContent = `Running... ${s.elapsed}s elapsed`;
+
+      const done = (s.step1_done ? 1 : 0) + (s.step2a_done ? 1 : 0) + (s.step2d_done ? 1 : 0) + (s.step3_done ? 1 : 0);
+      document.getElementById('progressBar').style.width = (done / 4 * 100) + '%';
+      document.getElementById('stepLabel').textContent = s.step_label;
+
+      let steps = '';
+      if (s.step1_done) steps += `<div class="step step-done">Step 1: Classification (${Math.round(s.step1_time)}s)</div>`;
+      if (s.step2a_done) steps += `<div class="step step-done">Step 2a: ${s.n_sheets} sheets, ${s.n_tables} tables (${Math.round(s.step2a_time)}s)</div>`;
+      if (s.step2d_done) steps += `<div class="step step-done">Step 2d: ${s.n_drawing_items} items (${Math.round(s.step2d_time)}s)</div>`;
+      if (s.step3_done) steps += `<div class="step step-done">Step 3: Vision done (${Math.round(s.step3_time)}s)</div>`;
+      document.getElementById('completedSteps').innerHTML = steps;
+
+    } else if (s.status === 'complete') {
+      clearInterval(pollTimer);
+      loadResults();
+
+    } else if (s.status === 'error') {
+      clearInterval(pollTimer);
+      hide('progress');
+      show('error');
+      document.getElementById('errorMsg').textContent = s.error;
+      document.getElementById('errorTrace').textContent = s.traceback || '';
+
+    } else if (s.status === 'idle') {
+      // Check for saved results
+      loadResults();
+    }
+  } catch (e) {
+    // Network error — keep polling
+  }
+}
+
+async function loadResults() {
+  try {
+    const resp = await fetch('/results');
+    if (!resp.ok) return;
+    const data = await resp.json();
+
+    hide('progress');
+    hide('upload');
+    hide('error');
+    show('results');
+
+    // Summary
+    const total = Math.round(data.step1_time + data.step2a_time + data.step2d_time + data.step3_time);
+    document.getElementById('stepSummary').innerHTML = `
+      <div class="step step-done">Step 1: ${Math.round(data.step1_time)}s</div>
+      <div class="step step-done">Step 2a: ${data.n_sheets} sheets, ${data.n_tables} tables (${Math.round(data.step2a_time)}s)</div>
+      <div class="step step-done">Step 2d: ${data.n_drawing_items} items (${Math.round(data.step2d_time)}s)</div>
+      <div class="step step-done">Step 3: ${Math.round(data.step3_time)}s</div>
+      <div class="step step-done" style="background:#1a3a1a;font-weight:700">Total: ${total}s</div>
+    `;
+
+    // Metrics
+    const items = data.items || [];
+    const nQty = items.filter(i => i.qty !== null).length;
+    document.getElementById('mTotal').textContent = items.length;
+    document.getElementById('mQty').textContent = nQty;
+    document.getElementById('mReview').textContent = items.length - nQty;
+
+    // Table
+    const tbody = document.getElementById('tableBody');
+    tbody.innerHTML = items.map(i => {
+      const conf = i.confidence || 0;
+      const confClass = conf >= 0.8 ? 'confidence-high' : conf >= 0.5 ? 'confidence-med' : 'confidence-low';
+      return `<tr>
+        <td>${esc(i.trade)}</td>
+        <td>${esc(i.description)}</td>
+        <td>${i.qty !== null ? i.qty : ''}</td>
+        <td>${esc(i.unit)}</td>
+        <td>${esc(i.mark)}</td>
+        <td class="${confClass}">${conf ? Math.round(conf * 100) + '%' : ''}</td>
+      </tr>`;
+    }).join('');
+  } catch (e) {
+    // No results yet
+  }
+}
+
+async function resetPipeline() {
+  await fetch('/reset', { method: 'POST' });
+  hide('error');
+  hide('results');
+  hide('progress');
+  show('upload');
+  runBtn.disabled = selectedFiles.length === 0;
+}
+
+function show(id) { document.getElementById(id).style.display = 'block'; }
+function hide(id) { document.getElementById(id).style.display = 'none'; }
+function esc(s) { const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
+
+// On page load, check if there are results or a running pipeline
+pollStatus();
+</script>
+
+</body>
+</html>

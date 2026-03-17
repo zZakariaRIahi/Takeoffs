@@ -15,22 +15,11 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY streamlit_app.py .
+COPY main.py .
+COPY static/ ./static/
 COPY app/ ./app/
-COPY .streamlit/ ./.streamlit/
 
-# Cloud Run uses PORT env var (default 8080)
 ENV PORT=8080
 EXPOSE ${PORT}
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:${PORT}/_stcore/health')" || exit 1
-
-CMD streamlit run streamlit_app.py \
-    --server.port=${PORT} \
-    --server.address=0.0.0.0 \
-    --server.headless=true \
-    --server.enableXsrfProtection=false \
-    --server.enableCORS=false \
-    --server.maxUploadSize=500 \
-    --server.maxMessageSize=500
+CMD uvicorn main:app --host 0.0.0.0 --port ${PORT} --timeout-keep-alive 1800
