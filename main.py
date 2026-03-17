@@ -120,6 +120,7 @@ def _run_pipeline(file_data: List[Tuple[str, bytes]]):
                 "unit": i.unit,
                 "mark": i.schedule_mark or "",
                 "confidence": round(i.confidence, 2) if i.confidence else 0,
+                "source": i.source or "",
             }
             for i in final_items
         ]

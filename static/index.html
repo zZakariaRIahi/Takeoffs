@@ -99,7 +99,7 @@
   <div class="card table-wrap">
     <table>
       <thead>
-        <tr><th>Trade</th><th>Description</th><th>Qty</th><th>Unit</th><th>Mark</th><th>Confidence</th></tr>
+        <tr><th>Trade</th><th>Description</th><th>Qty</th><th>Unit</th><th>Mark</th><th>Source</th><th>Confidence</th></tr>
       </thead>
       <tbody id="tableBody"></tbody>
     </table>
@@ -242,6 +242,7 @@ async function loadResults() {
         <td>${i.qty !== null ? i.qty : ''}</td>
         <td>${esc(i.unit)}</td>
         <td>${esc(i.mark)}</td>
+        <td style="font-size:0.75rem;color:#999">${esc(i.source || '')}</td>
         <td class="${confClass}">${conf ? Math.round(conf * 100) + '%' : ''}</td>
       </tr>`;
     }).join('');

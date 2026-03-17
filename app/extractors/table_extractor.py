@@ -550,6 +550,7 @@ def schedule_rows_to_estimate_items(
             material_spec="; ".join(material_parts),
             schedule_mark=row.mark,
             notes="; ".join(notes_parts),
+            source=f"schedule:{row.schedule_type}",
         )
         items.append(item)
     logger.info(f"  Created {len(items)} estimate items from schedule rows")

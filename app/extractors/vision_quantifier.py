@@ -140,11 +140,14 @@ def _build_trade_page_prompt(
         "HOW TO QUANTIFY:",
         "══════════════════════════════════════════",
         "",
-        "FOR COUNT TASKS:",
-        "  1. Divide the drawing into 4 quadrants (NW, NE, SW, SE).",
-        "  2. Scan each quadrant — count every matching symbol/mark.",
-        "  3. Include symbols in enlarged areas, details, and insets.",
-        "  4. Report: \"NW: 3, NE: 4, SW: 2, SE: 3 = 12 total\"",
+        "FOR COUNT TASKS (MANDATORY QUADRANT METHOD):",
+        "  1. REQUIRED: Divide the drawing into 4 quadrants (NW, NE, SW, SE).",
+        "  2. Count EACH quadrant separately — report the count for each.",
+        "  3. Include symbols in enlarged areas, details, insets, and near edges.",
+        "  4. Your response MUST include quadrant breakdown: \"NW: 3, NE: 4, SW: 2, SE: 3 = 12 total\"",
+        "  5. If a quadrant has 0 matching symbols, explicitly report \"NW: 0\".",
+        "  6. DO NOT skip the quadrant breakdown — answers without it will be rejected.",
+        "  7. Double-check your count by re-scanning each quadrant after the first pass.",
         "",
         "FOR MEASURE TASKS:",
         "  1. Read dimension strings on the drawing (e.g., 15'-0\", 22'-6\").",
@@ -492,6 +495,12 @@ def quantify_items(
             item.confidence = confidence_map.get(worst_confidence, 0.65)
             item.extraction_method = "vision_count" if item.needs_counting else "vision_measurement"
             item.notes = " | ".join(all_methods) if all_methods else item.notes
+            # Update source with the sheet where vision counted/measured
+            if item.counting_source_pages:
+                pg = item.counting_source_pages[0]
+                sheet_match = next((s for s in sheets if s.global_page_number == pg), None)
+                sid = sheet_match.sheet_id if sheet_match else ""
+                item.source = f"plan_count:{sid}" if item.needs_counting else f"plan_measurement:{sid}"
             updated += 1
         else:
             kept_null += 1

@@ -1,0 +1,114 @@
+================================================================================
+QTO PIPELINE RESULTS — 24-086
+================================================================================
+
+STEP TIMINGS
+----------------------------------------
+Step 1: Classification      221s
+Step 2a: Sheets + Tables    155s
+Step 2d: Drawing Reader     251s
+Step 3: Vision Quantifier   703s
+TOTAL                       1329s (22.2 min)
+
+SUMMARY
+----------------------------------------
+Sheets:          40
+Tables:          10
+Drawing Items:   89
+Total Items:     89
+With Quantity:   66
+Manual Review:   23
+
+ITEMS
+================================================================================
+Trade                          Description                                             Qty Unit   Mark          Conf
+------------------------------------------------------------------------------------------------------------------------
+Site Work                      Proposed Aggregate Pavement (Parking and Drives)     5606.0 LS                    65%
+Site Work                      Proposed Concrete Slab on Grade (Exterior)           5940.0 SF                    85%
+Site Work                      Demolition of Aggregate Pavement                      878.0 SF                    65%
+Site Work                      Demolition of 6" PVC Pipe                              11.0 LF                    85%
+Site Work                      Demolition of 8" PVC Pipe                               2.0 LF                    85%
+Site Work                      Demolition of 8" Storm Cleanout                         1.0 EA                    85%
+Site Work                      Perimeter Erosion Barrier (Silt Fence)                205.0 LF                    65%
+Site Work                      Concrete Washout Pit                                    1.0 EA                    85%
+Site Work                      Topsoil Placement, 6" depth                          5050.0 SF                    65%
+Site Work                      Unsuitable Soil Removal and Replacement Allowanc      100.0 CY                    85%
+Concrete                       Concrete Foundation Walls, 10" thick                 247.25 LF                    85%
+Concrete                       Concrete Footings, 2'-0" wide                        247.25 LF                    85%
+Concrete                       6" Concrete Slab on Grade (S1)                       7240.0 SF                    85%
+Concrete                       Vapor Barrier under slab                             7240.0 SF                    85%
+Concrete                       Sawcut Control Joints                                1078.0 LF                    85%
+Concrete                       Reinforcing Steel                                           LBS                   50%
+Concrete                       Drill and Epoxy Dowels                                  8.0 EA                    85%
+Metals                         Pre-Engineered Wood Pole Building Package               1.0 LS                    85%
+Rough Carpentry                Wood Stud Framing - Wall Type B                        71.0 LF     B              65%
+Rough Carpentry                Wood Stud Framing - Wall Type C, D, E                  23.6 LF     C,D,E          85%
+Rough Carpentry                Wood Stud Framing - Wall Type F                        16.1 LF     F              85%
+Rough Carpentry                Wood Blocking in Walls                                  1.0 LS                    65%
+Rough Carpentry                Fire-Rated Plywood Attic Wall                               SF                    50%
+Insulation                     Batt Insulation in Walls                              331.0 SF                    85%
+Insulation                     Blown-in Attic Insulation                             859.0 SF                    65%
+Insulation                     Slab Edge Perimeter Insulation                              LF                    50%
+Doors and Windows              Wood Door, Type D1/D2/D3/D3E                            3.0 EA     D1,D2,D3,103E   85%
+Doors and Windows              Aluminum Storefront Door, Type D4                       1.0 EA     D4             85%
+Doors and Windows              Steel Overhead Door, Type 103A                          1.0 EA     103A           85%
+Doors and Windows              Steel Overhead Door, Type 103C                          1.0 EA     103C           85%
+Doors and Windows              Steel Overhead Door, Type 103D                          1.0 EA     103D           85%
+Doors and Windows              Aluminum Window, Type W1                                5.0 EA     W1             65%
+Doors and Windows              Translucent Window System (Kalwall)                   168.0 SF     GL-2           65%
+Drywall                        Gypsum Wall Board, 5/8" Type X                        332.0 SF                    85%
+Drywall                        Gypsum Board Ceiling                                        SF                    50%
+Drywall                        General Purpose Access Panel, 24"x24"                       EA                    50%
+Drywall                        Wall Access Panel, 24"x36"                              1.0 EA                    85%
+Painting                       Paint Gypsum Wall Board                               940.0 SF                    65%
+Painting                       Paint CMU Walls                                      8352.0 SF                    65%
+Painting                       Paint Hollow Metal Doors and Frames                     3.0 EA                    85%
+Flooring                       Vinyl Composition Tile (VCT) Flooring                  52.0 SF     V.C.T.         65%
+Flooring                       Carpet Flooring                                        8.44 SY     CARPET         85%
+Flooring                       VCT Wall Base                                          26.0 LF     V.C.T.         65%
+Flooring                       Rubber Wall Base                                       32.0 LF     RUBBER         65%
+Bath and Accessories           ADA Bathroom Signage                                    1.0 EA                    85%
+Bath and Accessories           Grab Bar, 42" Side                                      1.0 EA                    85%
+Bath and Accessories           Grab Bar, 36" Back                                      1.0 EA                    85%
+Bath and Accessories           Mirror, 24" x 42"                                       1.0 EA                    85%
+Bath and Accessories           Install Owner-Furnished Bath Accessories                1.0 LS                    85%
+Fire Sprinklers                Wall Mounted Fire Extinguisher                          2.0 EA                    85%
+Plumbing                       Water Closet                                            1.0 EA     WC-1           85%
+Plumbing                       Urinal                                                  1.0 EA     UR-1           85%
+Plumbing                       Lavatory                                                1.0 EA     L-1            85%
+Plumbing                       Service Sink / Slop Sink                                1.0 EA     SS-1           85%
+Plumbing                       Emergency Eyewash                                       1.0 EA     EW-1           85%
+Plumbing                       Floor Drain                                                 EA     FD-1           50%
+Plumbing                       Trench Drain                                                LF     TD-1           50%
+Plumbing                       Hose Bibb                                               2.0 EA     HV-1, HV-2     85%
+Plumbing                       Sanitary, Waste, and Vent Piping                            LF                    50%
+Plumbing                       Domestic Water Piping                                 587.0 LF                    65%
+Plumbing                       Natural Gas Piping                                    164.0 LF                    65%
+Plumbing                       Pipe Insulation                                       345.0 LF                    65%
+HVAC and Sheet Metals          Electric Unit Heater                                    1.0 EA     UH-1           85%
+HVAC and Sheet Metals          Ceiling Exhaust Fan                                     1.0 EA     EF-1           85%
+HVAC and Sheet Metals          Power Roof Exhauster                                    1.0 EA     PRE-1          85%
+HVAC and Sheet Metals          Intake Louver                                           1.0 EA     IL-1           85%
+HVAC and Sheet Metals          Gas Fired Infrared Heater                               4.0 EA     IRH-1,2,3,4    85%
+HVAC and Sheet Metals          Infrared Heater Control System                          1.0 LS     VP-1, CP       85%
+HVAC and Sheet Metals          Galvanized Steel Ductwork                                   LBS                   50%
+HVAC and Sheet Metals          Vent Thru Roof                                              EA                    50%
+Electrical                     Lighting Fixture Type A1                                    EA     A1             50%
+Electrical                     Lighting Fixture Type A2                                    EA     A2             50%
+Electrical                     Lighting Fixture Type B1                                    EA     B1             50%
+Electrical                     Emergency Light Fixture                                     EA     EM             50%
+Electrical                     Exit Sign                                                   EA     EX             50%
+Electrical                     Duplex Receptacle                                           EA                    50%
+Electrical                     Weatherproof Duplex Receptacle                              EA                    50%
+Electrical                     Welder Receptacle                                           EA                    50%
+Electrical                     Occupancy Sensor                                            EA                    50%
+Electrical                     Fire Alarm Horn/Strobe                                      EA                    50%
+Electrical                     Heat Detector                                               EA                    50%
+Electrical                     Data/Telecom Outlet                                         EA                    50%
+Electrical                     Panelboard 'HCC-AG-LPA'                                 1.0 EA     HCC-AG-LPA     85%
+Electrical                     Panelboard 'HCC-AG-MDP'                                 1.0 EA     HCC-AG-MDP     85%
+Electrical                     Conduit and Wire                                            LF                    50%
+General Requirements           Firestopping at Penetrations                            1.0 LS                    65%
+General Requirements           Final Cleaning                                          1.0 LS                    65%
+General Requirements           Temporary Protection and Dust Barriers                  1.0 LS                    65%
+General Requirements           Special Inspections                                     1.0 LS                    85%

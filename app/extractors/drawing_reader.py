@@ -80,13 +80,17 @@ must still be provided and installed." You MUST extract from ALL sources.
 EXTRACTION STRATEGY — 4 PASSES OVER THE DRAWINGS
 ═══════════════════════════════════════════════════════════════════
 
-PASS 1 — SCHEDULE-BASED ITEMS:
-  Read the pre-extracted schedule data. For each scheduled item:
-  - Extract explicit QTY if the schedule has a QTY column
-  - Link to plan pages where the mark appears
-  - Include full material spec (manufacturer, model, finish, size)
+PASS 1 — SCHEDULE-BASED ITEMS (from pre-extracted data ONLY):
+  Use the PRE-EXTRACTED SCHEDULE DATA provided below as GROUND TRUTH.
+  DO NOT re-read or re-extract schedule tables from the PDF — the data has
+  already been parsed with higher accuracy in Step 2a. For each scheduled item:
+  - Use the EXACT mark, type, material, and spec from the pre-extracted data
+  - DO NOT modify or "correct" values from the pre-extracted schedules
+  - Link to plan pages where the mark appears (scan plans for mark symbols)
   - Flag as needs_counting if qty depends on counting symbols on plans
   - Flag as needs_measurement if qty depends on area/length
+  - DO NOT add schedule items that are not in the pre-extracted data
+  Set source_type="schedule" for all items from this pass.
 
 PASS 2 — PLAN-DRIVEN ITEMS (keynotes, symbols, annotations):
   Scan EVERY plan page for items NOT in any schedule. This is critical —
@@ -164,6 +168,42 @@ PASS 2 — PLAN-DRIVEN ITEMS (keynotes, symbols, annotations):
     - Fire extinguisher cabinets (needs_counting)
     - Standpipe connections (needs_counting)
 
+PASS 2B — ELEVATION & DETAIL SHEETS (building envelope):
+  Explicitly scan ALL elevation sheets and detail/section sheets for building
+  envelope scope. These items are CRITICAL and only appear on elevations/sections,
+  NOT on floor plans. Set source_type="elevation" or "detail" for these items.
+
+  ROOFING:
+    - Metal roof panels / standing seam — type, gauge, profile (needs_measurement, SF)
+    - Roof underlayment / ice & water shield (needs_measurement, SF)
+    - Ridge cap, hip cap, valley flashing (needs_measurement, LF)
+    - Ridge vent (needs_measurement, LF)
+    - Roof penetration flashings — pipe boots, curbs (needs_counting, EA)
+    - Snow guards / snow retention system (needs_measurement, LF)
+
+  SIDING & CLADDING:
+    - Metal wall panels / siding — type, profile, gauge (needs_measurement, SF)
+    - Metal liner panels (needs_measurement, SF)
+    - Wall sheathing / weather barrier (needs_measurement, SF)
+
+  GUTTERS & DRAINAGE:
+    - Gutters — profile, size, material (needs_measurement, LF)
+    - Downspouts — size, material (needs_counting + needs_measurement, EA/LF)
+
+  TRIM & FLASHING:
+    - Corner trim, J-channel, starter strip (needs_measurement, LF)
+    - Window/door head flashing, sill flashing (needs_measurement, LF)
+    - Drip edge at eaves and rakes (needs_measurement, LF)
+    - Fascia — material, size (needs_measurement, LF)
+
+  SOFFIT:
+    - Soffit panels — vented or solid, material (needs_measurement, SF)
+
+  STRUCTURAL SHOWN ON DETAILS:
+    - Concrete pads at overhead doors or equipment (needs_measurement, EA/SF)
+    - New columns or posts shown in sections (needs_counting, EA)
+    - Lintels, headers, steel connections shown in details (needs_counting, EA)
+
 PASS 3 — GENERAL NOTES, DETAILS & NOTE-ONLY SCOPE:
   Read general notes pages, construction notes, and detail pages for scope that
   is STATED IN TEXT but not shown as symbols on plans. These are real estimate
@@ -230,7 +270,7 @@ OUTPUT FORMAT — Return a JSON object:
         {"page": 8, "sheet_id": "A2.10", "title": "Reflected Ceiling Plans"}
       ],
       "source_pages": [7, 8, 13],
-      "source_type": "schedule|keynote|plan_symbol|general_note|detail|legend",
+      "source_type": "schedule|keynote|plan_symbol|general_note|detail|elevation|legend",
       "needs_measurement": false,
       "measurement_note": "",
       "needs_counting": true,
@@ -282,6 +322,26 @@ RULES
     individually priced items that estimators need to see.
 16. BE THOROUGH. An experienced estimator reviewing your output should not find
     major scope gaps. Think about what a contractor would need to BUILD this project.
+
+17. CONSTRUCTION ABBREVIATIONS — understand these standard markings:
+    (P) = existing / previously installed — DO NOT include as new BOM item
+    (E) = existing — DO NOT include as new BOM item
+    EXIST / EXISTING = not new scope — DO NOT include
+    (N) = new work — include in BOM
+    NIC = not in contract — DO NOT include
+    FBO = furnished by owner — include but prefix description with "FBO — Install only:"
+          and set material_spec to "Furnished by Owner"
+    BY OWNER = same as FBO
+    If an existing item is being RELOCATED or RECONNECTED, include it with
+    description prefixed "Relocate:" and source_type="keynote".
+
+18. NEVER re-extract data from schedule pages. The PRE-EXTRACTED SCHEDULES section
+    below is authoritative. Your job for schedules is ONLY to link them to plan pages
+    and flag counting/measurement needs.
+
+19. SCAN ELEVATIONS AND DETAILS for building envelope items (roofing, siding, gutters,
+    trim, soffit, flashing, metal panels). These are high-value items that ONLY appear
+    on elevation and detail/section sheets, never on floor plans.
 
 Return ONLY valid JSON. No markdown fences, no explanation.
 """
@@ -453,6 +513,29 @@ def _dicts_to_estimate_items(parsed: Dict[str, Any]) -> List[EstimateItem]:
             elif isinstance(pp, (int, float)):
                 plan_page_numbers.append(int(pp))
 
+        # Build source provenance tag
+        sheet_id_for_source = ""
+        if raw_plan_pages and isinstance(raw_plan_pages[0], dict):
+            sheet_id_for_source = str(raw_plan_pages[0].get("sheet_id", ""))
+
+        if source_type == "schedule":
+            sched_mark = str(d.get("schedule_mark", ""))
+            source_tag = f"schedule:{sched_mark}" if sched_mark else "schedule"
+        elif needs_counting:
+            source_tag = f"plan_count:{sheet_id_for_source}" if sheet_id_for_source else "plan_count"
+        elif needs_measurement:
+            source_tag = f"plan_measurement:{sheet_id_for_source}" if sheet_id_for_source else "plan_measurement"
+        elif source_type == "elevation":
+            source_tag = f"elevation:{sheet_id_for_source}" if sheet_id_for_source else "elevation"
+        elif source_type == "detail":
+            source_tag = f"detail:{sheet_id_for_source}" if sheet_id_for_source else "detail"
+        elif source_type == "general_note":
+            source_tag = "note"
+        elif source_type == "keynote":
+            source_tag = f"keynote:{sheet_id_for_source}" if sheet_id_for_source else "keynote"
+        else:
+            source_tag = source_type or "drawing"
+
         item = EstimateItem(
             trade=str(d.get("trade", "General Requirements")),
             item_description=str(d.get("item_description", ""))[:100],
@@ -471,6 +554,7 @@ def _dicts_to_estimate_items(parsed: Dict[str, Any]) -> List[EstimateItem]:
             needs_field_verification=False,
             review_reason=str(d.get("measurement_note", "") or d.get("counting_note", "")),
             notes=str(d.get("reasoning", "")),
+            source=source_tag,
         )
         items.append(item)
 

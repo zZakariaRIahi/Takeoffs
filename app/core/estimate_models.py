@@ -79,6 +79,11 @@ class EstimateItem:
     schedule_mark: str = ""             # links to ExtractedScheduleRow.mark
     notes: str = ""
 
+    # Source provenance
+    source: str = ""                    # "schedule:<name>", "plan_count:<sheet_id>",
+                                        # "plan_measurement:<sheet_id>", "detail:<sheet_id>",
+                                        # "elevation:<sheet_id>", "note"
+
 
 @dataclass
 class ExtractionResult:
