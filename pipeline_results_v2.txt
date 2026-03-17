@@ -1,0 +1,101 @@
+========================================================================================================================
+QTO PIPELINE RESULTS v2 — 24-086 (with accuracy fixes)
+========================================================================================================================
+
+STEP TIMINGS
+----------------------------------------
+Step 1: Classification      186s
+Step 2a: Sheets + Tables    202s
+Step 2d: Drawing Reader     230s
+Step 3: Vision Quantifier   846s
+TOTAL                       1465s (24.4 min)
+
+SUMMARY
+----------------------------------------
+Sheets:          40
+Tables:          17
+Drawing Items:   76
+Total Items:     76
+With Quantity:   24
+Manual Review:   52
+
+ITEMS
+========================================================================================================================
+Trade                     Description                                        Qty Unit  Mark       Source                     Conf
+------------------------------------------------------------------------------------------------------------------------
+Site Work                 Site Improvements - Base Bid, including 100        1.0 LS               schedule                    85%
+Flooring                  Vinyl Composition Tile (VCT) Flooring                  SF               schedule                    50%
+Finish Carpentry          Vinyl Composition Tile (VCT) Base                      LF               schedule                    50%
+Painting                  Interior Wall Painting                           464.0 SF               plan_measurement:A103       65%
+Drywall                   Acoustical Ceiling Tile (ACT) System                   SF               schedule                    50%
+Tile & Solid Surfaces     Ceramic Tile Flooring                             52.0 SF               plan_measurement:A103       65%
+Tile & Solid Surfaces     Ceramic Tile Base                                 26.0 LF               plan_measurement:A103       65%
+Concrete                  Sealed Concrete Floor Finish                           SF               schedule                    50%
+Painting                  Paint Exposed Ceiling Structure                        SF               schedule                    50%
+Doors and Windows         Wood Door, Type A                                      EA    D1         schedule:D1                 50%
+Doors and Windows         Wood Door, Type B                                      EA    D2         schedule:D2                 45%
+Doors and Windows         Wood Door, Type C                                      EA    D3         schedule:D3                 45%
+Doors and Windows         Aluminum Door, Type D                                  EA    D4         schedule:D4                 45%
+Doors and Windows         Aluminum Window                                        EA    W1         schedule:W1                 50%
+Bath and Accessories      Grab Bar, 3'-0" x 4'-0" (ADA)                          EA    1          schedule:1                  50%
+Bath and Accessories      Grab Bar, 1 1/2" Dia. (ADA)                            EA    2          schedule:2                  50%
+Bath and Accessories      Toilet Tissue Holder (ADA)                             EA    3          schedule:3                  50%
+Bath and Accessories      Paper Towel Dispenser / Pad                            EA    4          schedule:4                  50%
+Bath and Accessories      Soap Dispenser                                         EA    5          schedule:5                  50%
+Bath and Accessories      Mirror (ADA)                                           EA    6          schedule:6                  50%
+Bath and Accessories      Grab Bar, 1 1/2" Dia. (Back)                           EA    9          schedule:9                  50%
+Site Work                 Demolition of PVC Piping                          13.0 LF               plan_measurement:C3         85%
+Site Work                 Demolition of Storm Cleanout                       1.0 EA               plan_symbol                 85%
+Site Work                 Demolition of Aggregate Pavement                 900.0 SF               plan_measurement:C3         65%
+Site Work                 Demolition of HMA Pavement                       240.0 SF               plan_measurement:C6         65%
+Site Work                 Demolition of PCC Curb & Gutter                   10.0 LF               plan_symbol                 85%
+Site Work                 Demolition of Fence for Gas Installation          10.0 LF               plan_measurement:C6         65%
+Site Work                 New Concrete Slab on Grade (Exterior)           3060.0 SF               plan_measurement:C4         65%
+Site Work                 New Aggregate Pavement (Parking Area)           5784.0 SF               plan_measurement:C4         65%
+Site Work                 PVC Storm Drain Piping                           308.8 LF               plan_measurement:C5         85%
+Site Work                 Downspout Connections to Storm System             13.0 EA               plan_count:C5               85%
+Site Work                 Sanitary Cleanouts                                 2.0 EA               plan_count:C5               85%
+Site Work                 Perimeter Erosion Barrier (Silt Fence)           320.0 LF               plan_measurement:C8         65%
+Site Work                 Topsoil Placement and Final Grading             4925.0 SF               plan_measurement:C8         65%
+Site Work                 Concrete Washout Facility                          1.0 EA               plan_symbol                 85%
+Concrete                  Concrete Foundation Walls and Footings                 CY               plan_measurement:S101       50%
+Concrete                  6" Concrete Slab on Grade                              SF    S1         plan_measurement:S101       50%
+Concrete                  Welded Wire Fabric in Slab                             SF               plan_measurement:S101       50%
+Concrete                  Compacted Granular Fill under Slab                     CY               plan_measurement:S101       50%
+Insulation                Vapor Barrier under Slab                               SF               plan_measurement:S101       50%
+Concrete                  Slab on Grade Control Joints                           LF               plan_measurement:S101       50%
+Concrete                  Reinforcing Steel (Rebar)                              LBS              plan_measurement:S201       50%
+Roofing                   Metal Roof Panel System                         5343.0 SF               plan_measurement:A105       65%
+Roofing                   Ridge Vent                                        76.0 LF               plan_measurement:A105       65%
+Roofing                   Snow and Ice Breaker System                      152.0 LF               plan_measurement:A105       65%
+Stucco and Siding         Metal Wall Panels                                      SF               plan_measurement:A105       50%
+Stucco and Siding         Metal Liner Panels (Interior)                          SF               plan_measurement:A102       50%
+Insulation                Air and Water Barrier                                  SF               plan_measurement:A105       50%
+Stucco and Siding         Metal Gutters                                          LF               plan_measurement:A105       50%
+Stucco and Siding         Metal Downspouts                                       EA               plan_count:A105             50%
+Finish Carpentry          Metal Trim (Corners, J-channel, etc.)                  LF               plan_measurement:A105       50%
+Finish Carpentry          Metal Fascia                                           LF               plan_measurement:A105       50%
+Stucco and Siding         Vented Metal Soffit                                    SF               plan_measurement:A105       50%
+Rough Carpentry           Wood Framing for Interior Partitions                   LF               plan_measurement:A102       50%
+Drywall                   Gypsum Wall Board, 5/8" Type 'X'                 261.0 SF               plan_measurement:A103       65%
+Insulation                Batt Insulation in Walls                               SF               plan_measurement:A102       50%
+Insulation                Blown-in Attic Insulation                              SF               plan_measurement:A103       50%
+Insulation                Perimeter Slab Insulation                              LF               plan_measurement:S101       50%
+Doors and Windows         Access Panel, General Purpose                          EA               plan_count:A103             50%
+Doors and Windows         Access Panel, Wall                                     EA               plan_count:A102             50%
+Doors and Windows         ADA Compliant Bathroom Sign                            EA               plan_count:A102             50%
+Fire Sprinklers           Wall Mounted Fire Extinguisher                         EA               plan_count:A102             50%
+Fire Sprinklers           Firestop Wall in Attic Space                           SF               plan_measurement:A103       50%
+General Requirements      Wood Blocking in Walls for Accessories             1.0 LS               note                        85%
+General Requirements      Firestopping at all MEP penetrations               1.0 LS               note                        85%
+Electrical                Duplex Receptacle                                      EA               plan_count:E102             50%
+Electrical                Welder Receptacle                                      EA               plan_count:E102             50%
+Electrical                Weatherproof GFI Receptacle                            EA               plan_count:E102             50%
+Electrical                Data/Telephone Outlet                                  EA               plan_count:E102             50%
+Electrical                Fire Alarm Heat Detector                               EA               plan_count:E102             50%
+Electrical                Fire Alarm Horn/Strobe                                 EA               plan_count:E102             50%
+Electrical                Connection to Overhead Door Opener                     EA               plan_count:E102             50%
+Electrical                Overhead Door Push Button Station                      EA               plan_count:E102             50%
+Electrical                Junction Box for future camera                         EA               plan_count:E102             50%
+HVAC and Sheet Metals     Galvanized Steel Ductwork                              LBS              plan_measurement:M101       50%
+Plumbing                  Trench Drain                                           LF               plan_measurement:A102       50%

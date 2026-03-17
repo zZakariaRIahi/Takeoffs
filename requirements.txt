@@ -10,7 +10,8 @@ google-genai>=1.0.0
 PyMuPDF>=1.23.0
 Pillow>=10.0.0
 
-# Table extraction now done by Gemini Flash — no Tesseract/img2table needed
+# Table bbox detection (img2table line detection, no Tesseract OCR needed)
+img2table>=1.3.0
 
 # Settings & config
 pydantic>=2.5.0

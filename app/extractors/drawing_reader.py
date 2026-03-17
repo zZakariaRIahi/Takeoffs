@@ -80,16 +80,16 @@ must still be provided and installed." You MUST extract from ALL sources.
 EXTRACTION STRATEGY — 4 PASSES OVER THE DRAWINGS
 ═══════════════════════════════════════════════════════════════════
 
-PASS 1 — SCHEDULE-BASED ITEMS (from pre-extracted data ONLY):
-  Use the PRE-EXTRACTED SCHEDULE DATA provided below as GROUND TRUTH.
-  DO NOT re-read or re-extract schedule tables from the PDF — the data has
-  already been parsed with higher accuracy in Step 2a. For each scheduled item:
-  - Use the EXACT mark, type, material, and spec from the pre-extracted data
-  - DO NOT modify or "correct" values from the pre-extracted schedules
+PASS 1 — SCHEDULE-BASED ITEMS:
+  Pre-extracted schedule data is provided below as REFERENCE to help you
+  identify scheduled items. Use it as a starting point, but ALWAYS verify
+  against the actual drawing pages. The PDF is the ultimate source of truth.
+  For each scheduled item:
+  - Read the actual schedule on the drawing page to confirm types and specs
   - Link to plan pages where the mark appears (scan plans for mark symbols)
+  - Include full material spec (manufacturer, model, finish, size)
   - Flag as needs_counting if qty depends on counting symbols on plans
   - Flag as needs_measurement if qty depends on area/length
-  - DO NOT add schedule items that are not in the pre-extracted data
   Set source_type="schedule" for all items from this pass.
 
 PASS 2 — PLAN-DRIVEN ITEMS (keynotes, symbols, annotations):
@@ -335,9 +335,9 @@ RULES
     If an existing item is being RELOCATED or RECONNECTED, include it with
     description prefixed "Relocate:" and source_type="keynote".
 
-18. NEVER re-extract data from schedule pages. The PRE-EXTRACTED SCHEDULES section
-    below is authoritative. Your job for schedules is ONLY to link them to plan pages
-    and flag counting/measurement needs.
+18. The PRE-EXTRACTED SCHEDULES below are REFERENCE only — always verify against
+    the actual PDF. If the PDF shows different data than the pre-extracted schedules,
+    trust the PDF. Read schedule abbreviations exactly (HM, SC, RB, OHD, etc.).
 
 19. SCAN ELEVATIONS AND DETAILS for building envelope items (roofing, siding, gutters,
     trim, soffit, flashing, metal panels). These are high-value items that ONLY appear

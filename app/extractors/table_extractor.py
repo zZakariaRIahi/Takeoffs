@@ -1,19 +1,28 @@
-"""Step 2a — Sheet Index + Table Extraction (Gemini Flash vision).
+"""Step 2a — Sheet Index + Table Extraction.
 
-Sends drawing page images in batches of 5 to Gemini Flash.
-One prompt handles both sheet index detection AND schedule extraction.
-No Tesseract or img2table — Gemini does everything visually.
+3-phase approach:
+  Phase 1: img2table (no OCR, <1s/page) detects table bboxes at 150 DPI
+  Phase 2: Send crops at 150 DPI to Gemini Flash (5 per call, parallel)
+           to filter out false positives (plans, notes, title blocks)
+  Phase 3: Re-render confirmed tables at 300 DPI, send to Gemini Flash
+           for accurate content extraction
 
-4 parallel workers, 5 pages per batch → 40 pages in ~2 batches of calls.
+No Tesseract needed. img2table uses line detection only.
 """
 from __future__ import annotations
 
+import io
 import json
 import logging
+import os
 import re
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
 
+import fitz  # PyMuPDF
+from PIL import Image
+from img2table.document import Image as Img2TableImage
 from google import genai
 from google.genai import types as genai_types
 
@@ -29,15 +38,22 @@ from app.core.estimate_models import (
     ExtractedTable,
     SheetInfo,
 )
-import os
 
 logger = logging.getLogger(__name__)
 
-BATCH_SIZE = 5
-MAX_WORKERS = 4
+DETECT_DPI = 150
+CROP_DPI = 300
+FILTER_BATCH = 5
+EXTRACT_BATCH = 5
+WORKERS = 4
+
+# Minimum crop size to skip noise
+MIN_CROP_W = 80
+MIN_CROP_H = 40
+
 
 # ════════════════════════════════════════════════════════════════════════════════
-# Gemini client
+# Client
 # ════════════════════════════════════════════════════════════════════════════════
 
 def _get_genai_client():
@@ -54,132 +70,266 @@ def _get_genai_client():
 
 
 # ════════════════════════════════════════════════════════════════════════════════
-# Combined prompt — sheet index + table extraction
+# Phase 1: img2table bbox detection (no OCR)
 # ════════════════════════════════════════════════════════════════════════════════
 
-BATCH_PROMPT = """You are analyzing construction drawing pages to extract structured data.
+def _detect_bboxes_on_page(
+    pdf_bytes: bytes, local_page_idx: int, global_page: int,
+) -> List[dict]:
+    """Detect table bounding boxes using img2table line detection (no OCR)."""
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    zoom = DETECT_DPI / 72.0
+    pix = doc[local_page_idx].get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+    page_w, page_h = pix.width, pix.height
+    page_area = page_w * page_h
 
-For EACH page image below, do the following:
+    tmp_path = os.path.join(tempfile.gettempdir(), f"det_{global_page}_{id(doc)}.png")
+    with open(tmp_path, "wb") as f:
+        f.write(pix.tobytes("png"))
+    doc.close()
 
-1. **SHEET INDEX / DRAWING INDEX**: If a page contains a sheet index (list of all drawings
-   in the set, usually on the cover/title sheet), extract it as sheet_index entries.
+    try:
+        img_doc = Img2TableImage(src=tmp_path)
+        detected = img_doc.extract_tables(ocr=None, borderless_tables=False)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
-2. **SCHEDULES & TABLES**: If a page contains any schedule or table useful for construction
-   estimation (door schedule, window schedule, finish schedule, fixture schedule, equipment
-   schedule, panel schedule, lighting schedule, hardware schedule, plumbing fixture schedule,
-   mechanical schedule, ventilation schedule, or ANY other data table), extract ALL rows.
+    results = []
+    for table in detected:
+        bbox = table.bbox
+        w = bbox.x2 - bbox.x1
+        h = bbox.y2 - bbox.y1
 
-3. **SKIP**: If a page has NO tables or schedules (just plans, elevations, sections, details,
-   notes, or general drawings), skip it entirely — do not output anything for that page.
+        # Skip tiny (noise)
+        if w < MIN_CROP_W or h < MIN_CROP_H:
+            continue
+        # Skip full-page (drawing border)
+        if w * h > page_area * 0.90:
+            continue
+        # Skip title block (small region bottom-right)
+        if (w < 600 and h < 300
+                and bbox.x2 > page_w * 0.85
+                and bbox.y2 > page_h * 0.85):
+            continue
 
-Return a JSON object with TWO arrays:
+        results.append({
+            "global_page": global_page,
+            "bbox": (bbox.x1, bbox.y1, bbox.x2, bbox.y2),
+            "page_w": page_w,
+            "page_h": page_h,
+        })
 
-{
-  "sheet_index": [
-    {"sheet_id": "T101", "title": "Cover Sheet", "discipline": "General"},
-    {"sheet_id": "A101", "title": "Floor Plan", "discipline": "Architectural"}
-  ],
-  "tables": [
-    {
-      "page_global": 5,
-      "table_title": "Door Schedule",
-      "schedule_type": "door",
-      "headers": ["MARK", "TYPE", "SIZE", "MATERIAL"],
-      "rows": [
-        {"MARK": "101", "TYPE": "A", "SIZE": "3'-0\" x 7'-0\"", "MATERIAL": "Wood"},
-        {"MARK": "102", "TYPE": "B", "SIZE": "6'-0\" x 7'-0\"", "MATERIAL": "Aluminum"}
-      ]
-    }
-  ]
-}
+    return results
 
-RULES:
-- sheet_index: only if the page has an actual drawing index/sheet list. Copy EXACT sheet IDs and titles.
-  The discipline should be the section header (GENERAL, ARCHITECTURAL, STRUCTURAL, ELECTRICAL, etc.)
-- schedule_type: one of: door, window, finish, fixture, equipment, panel, lighting, hardware,
-  ventilation, mechanical, plumbing_fixture, other
-- Extract EVERY row from EVERY table — do NOT skip any rows
-- Use exact header names from the table
-- Empty cells: use ""
-- Numbers: keep as strings (preserve original formatting)
-- Merged cells spanning multiple rows: repeat the value in each row
-- page_global: use the global page number shown in the label for each page
-- If a page has NO tables/schedules, do not include it in the output at all
-- If NO pages in this batch have tables, return: {"sheet_index": [], "tables": []}
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Phase 2: Gemini Flash filtering (150 DPI crops)
+# ════════════════════════════════════════════════════════════════════════════════
+
+FILTER_PROMPT = """\
+You are filtering cropped regions from construction drawing pages.
+
+For EACH crop image below, classify it as ONE of:
+- "sheet_index" — a drawing index / sheet list
+- "table" — a schedule or data table useful for construction estimation
+  (door schedule, finish schedule, panel schedule, fixture schedule, etc.)
+- "not_table" — a plan view, section, detail, note block, title block,
+  legend, or anything that is NOT a structured data table
+
+IMPORTANT: Do NOT discard any real table or schedule. When in doubt, classify as "table".
+Only mark as "not_table" if it clearly is NOT a data table.
+
+Return JSON array:
+[
+  {"crop_id": 0, "type": "table"},
+  {"crop_id": 1, "type": "not_table"},
+  {"crop_id": 2, "type": "sheet_index"}
+]
 
 Return ONLY valid JSON, no markdown fences."""
 
 
-# ════════════════════════════════════════════════════════════════════════════════
-# Batch processing
-# ════════════════════════════════════════════════════════════════════════════════
+def _crop_from_page(pdf_bytes: bytes, local_page_idx: int, bbox: tuple, dpi: int) -> bytes:
+    """Render a page at given DPI and crop a bbox region."""
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    zoom = dpi / 72.0
+    pix = doc[local_page_idx].get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+    img = Image.open(io.BytesIO(pix.tobytes("png")))
+    doc.close()
 
-def _process_batch(
-    client,
-    batch: List[Tuple[int, bytes]],
-) -> dict:
-    """Send a batch of page images to Gemini Flash and extract tables.
+    # Scale bbox from DETECT_DPI to target DPI
+    scale = dpi / DETECT_DPI
+    pad = 15
+    x1 = max(0, int(bbox[0] * scale) - pad)
+    y1 = max(0, int(bbox[1] * scale) - pad)
+    x2 = min(img.width, int(bbox[2] * scale) + pad)
+    y2 = min(img.height, int(bbox[3] * scale) + pad)
+
+    cropped = img.crop((x1, y1, x2, y2))
+    buf = io.BytesIO()
+    cropped.save(buf, format="JPEG", quality=90)
+    return buf.getvalue()
+
+
+def _filter_batch(client, batch: List[Tuple[int, bytes]]) -> List[Tuple[int, str]]:
+    """Send a batch of crop images to Gemini Flash for filtering.
 
     Args:
-        client: Gemini client
-        batch: list of (global_page_number, jpeg_bytes)
-
+        batch: list of (crop_index, jpeg_bytes)
     Returns:
-        Parsed JSON dict with sheet_index and tables
+        list of (crop_index, type) where type is "table"|"sheet_index"|"not_table"
     """
-    contents = [BATCH_PROMPT]
-    for global_pg, img_bytes in batch:
-        contents.append(f"--- Page (global_page_number={global_pg}) ---")
+    contents = [FILTER_PROMPT]
+    for crop_idx, img_bytes in batch:
+        contents.append(f"--- crop_id={crop_idx} ---")
         contents.append(genai_types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"))
 
     response = client.models.generate_content(
         model="gemini-2.5-flash",
         contents=contents,
-        config=genai_types.GenerateContentConfig(
-            temperature=0,
-            max_output_tokens=32768,
-        ),
+        config=genai_types.GenerateContentConfig(temperature=0, max_output_tokens=2048),
     )
 
-    raw = (response.text or "{}").strip()
-    # Strip markdown fences
+    raw = (response.text or "[]").strip()
     if raw.startswith("```"):
         raw = re.sub(r"^```\w*\n?", "", raw)
         raw = re.sub(r"\n?```$", "", raw)
         raw = raw.strip()
 
     try:
-        return json.loads(raw)
+        results = json.loads(raw)
+        if not isinstance(results, list):
+            results = [results]
     except json.JSONDecodeError:
-        # Try to find JSON object
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        match = re.search(r"\[.*\]", raw, re.DOTALL)
         if match:
             try:
-                return json.loads(match.group())
+                results = json.loads(match.group())
             except json.JSONDecodeError:
-                pass
-        logger.warning(f"Failed to parse batch response: {raw[:300]}")
-        return {"sheet_index": [], "tables": []}
+                return [(idx, "table") for idx, _ in batch]  # Keep all on parse failure
+        else:
+            return [(idx, "table") for idx, _ in batch]
+
+    out = []
+    for r in results:
+        if isinstance(r, dict):
+            out.append((r.get("crop_id", -1), r.get("type", "table")))
+    return out
 
 
 # ════════════════════════════════════════════════════════════════════════════════
-# Discipline / sheet ID helpers (from sheet_indexer)
+# Phase 3: Gemini Flash extraction (300 DPI crops)
+# ════════════════════════════════════════════════════════════════════════════════
+
+EXTRACT_PROMPT = """\
+You are reading construction schedules/tables from high-resolution crops.
+
+Read EVERY cell exactly as written. Do NOT interpret, correct, or guess values.
+Common construction abbreviations you MUST preserve exactly:
+  HM = Hollow Metal, SC = Sealed Concrete, RB = Rubber Base,
+  ACT = Acoustical Ceiling Tile, GWB = Gypsum Wall Board,
+  OHD = Overhead Door, EXP = Exposed, FBO = Furnished By Owner,
+  (P) = Existing, (E) = Existing, (N) = New, NIC = Not In Contract
+
+For EACH table crop, return a JSON object:
+{
+  "table_title": "Door Schedule",
+  "schedule_type": "door",
+  "headers": ["MARK", "TYPE", "SIZE", "MATERIAL", "FRAME"],
+  "rows": [
+    {"MARK": "D1", "TYPE": "A", "SIZE": "3'-0\\" x 7'-0\\"", "MATERIAL": "HM", "FRAME": "HM"}
+  ]
+}
+
+If multiple crops are shown, return a JSON array of table objects.
+
+schedule_type: one of sheet_index, door, window, finish, fixture, equipment,
+  panel, lighting, hardware, ventilation, mechanical, plumbing_fixture, other
+
+Rules:
+- Copy EXACTLY what is written — do NOT substitute or guess
+- Extract EVERY row — do NOT skip any
+- Empty cells = ""
+- If you cannot read a cell clearly, use "?" — do NOT hallucinate
+- Numbers as strings (preserve formatting)
+- Merged cells: repeat value in each row
+- If a crop has no readable table, return {"table_title": "", "rows": []}
+
+Return ONLY valid JSON, no markdown fences."""
+
+
+def _extract_batch(client, batch: List[Tuple[int, bytes]]) -> List[Tuple[int, dict]]:
+    """Send table crops at 300 DPI to Gemini Flash for extraction."""
+    contents = [EXTRACT_PROMPT]
+    for crop_idx, img_bytes in batch:
+        contents.append(f"--- Table crop {crop_idx} ---")
+        contents.append(genai_types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"))
+
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=contents,
+        config=genai_types.GenerateContentConfig(temperature=0, max_output_tokens=32768),
+    )
+
+    raw = (response.text or "{}").strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```\w*\n?", "", raw)
+        raw = re.sub(r"\n?```$", "", raw)
+        raw = raw.strip()
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        match = re.search(r"[\[{].*[\]}]", raw, re.DOTALL)
+        if match:
+            try:
+                parsed = json.loads(match.group())
+            except json.JSONDecodeError:
+                return []
+        else:
+            return []
+
+    # Normalize to list
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+    if not isinstance(parsed, list):
+        return []
+
+    # Map each parsed table to its crop_idx
+    results = []
+    for i, item in enumerate(parsed):
+        if isinstance(item, dict):
+            idx = batch[min(i, len(batch) - 1)][0] if i < len(batch) else batch[-1][0]
+            results.append((idx, item))
+    return results
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# JSON helper
+# ════════════════════════════════════════════════════════════════════════════════
+
+def _parse_json(raw: str) -> dict:
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```\w*\n?", "", raw)
+        raw = re.sub(r"\n?```$", "", raw)
+        raw = raw.strip()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Sheet ID / discipline helpers
 # ════════════════════════════════════════════════════════════════════════════════
 
 _PREFIX_MAP: Dict[str, str] = {
-    "AD": "Architectural Demolition",
-    "A":  "Architectural",
-    "S":  "Structural",
-    "D":  "Demolition",
-    "M":  "Mechanical",
-    "E":  "Electrical",
-    "P":  "Plumbing",
-    "FP": "Fire Protection",
-    "L":  "Landscape",
-    "C":  "Civil",
-    "G":  "General",
-    "T":  "Title/Index",
-    "I":  "Interior",
+    "AD": "Architectural Demolition", "A": "Architectural", "S": "Structural",
+    "D": "Demolition", "M": "Mechanical", "E": "Electrical", "P": "Plumbing",
+    "FP": "Fire Protection", "L": "Landscape", "C": "Civil", "G": "General",
+    "T": "Title/Index", "I": "Interior",
 }
 
 _SHEET_ID_PATTERNS = [
@@ -188,7 +338,6 @@ _SHEET_ID_PATTERNS = [
     re.compile(r'(?:SHEET|DWG)\s*[:#]?\s*([A-Z]{1,2}[.-]?\d+[.-]?\d*)', re.IGNORECASE),
 ]
 
-
 def _detect_sheet_id(text: str, page_number: int) -> str:
     for pat in _SHEET_ID_PATTERNS:
         matches = pat.findall(text)
@@ -196,7 +345,6 @@ def _detect_sheet_id(text: str, page_number: int) -> str:
             matches.sort(key=len, reverse=True)
             return matches[0].upper()
     return f"PAGE-{page_number}"
-
 
 def _detect_discipline(sheet_id: str, text: str) -> str:
     sid = sheet_id.upper()
@@ -209,33 +357,28 @@ def _detect_discipline(sheet_id: str, text: str) -> str:
 
 
 # ════════════════════════════════════════════════════════════════════════════════
-# Page matching (from sheet_indexer)
+# Page matching
 # ════════════════════════════════════════════════════════════════════════════════
 
 def _match_pages_to_index(
-    all_pages: List[Tuple[ClassifiedFile, PageInfo]],
-    sheet_index_map: Dict[str, Tuple[str, str]],
-    index_page_idxs: set,
-) -> Dict[int, Tuple[str, str, str]]:
-    """Match PDF pages to sheet index entries."""
+    all_pages, sheet_index_map, index_page_idxs,
+):
     n_pages = len(all_pages)
     index_ids = list(sheet_index_map.keys())
-
-    page_to_matched_ids: Dict[int, List[str]] = {}
-    sid_to_pages: Dict[str, List[int]] = {sid: [] for sid in index_ids}
+    sid_to_pages = {sid: [] for sid in index_ids}
+    page_to_matched = {}
 
     for pg_idx, (_cf, page) in enumerate(all_pages):
         if pg_idx in index_page_idxs:
             continue
         text_upper = page.extracted_text.upper()
         for sid in index_ids:
-            pattern = r'\b' + re.escape(sid) + r'\b'
-            if re.search(pattern, text_upper):
-                page_to_matched_ids.setdefault(pg_idx, []).append(sid)
+            if re.search(r'\b' + re.escape(sid) + r'\b', text_upper):
+                page_to_matched.setdefault(pg_idx, []).append(sid)
                 sid_to_pages[sid].append(pg_idx)
 
-    assigned_pages: Dict[int, str] = {}
-    assigned_ids: Dict[str, int] = {}
+    assigned_pages = {}
+    assigned_ids = {}
 
     for pg_idx in sorted(index_page_idxs):
         if index_ids and index_ids[0] not in assigned_ids and pg_idx not in assigned_pages:
@@ -246,39 +389,35 @@ def _match_pages_to_index(
         if sid in assigned_ids:
             continue
         candidates = sid_to_pages[sid]
-        if len(candidates) == 1:
-            pg = candidates[0]
-            if pg not in assigned_pages:
-                assigned_pages[pg] = sid
-                assigned_ids[sid] = pg
+        if len(candidates) == 1 and candidates[0] not in assigned_pages:
+            assigned_pages[candidates[0]] = sid
+            assigned_ids[sid] = candidates[0]
 
     for sid in index_ids:
         if sid in assigned_ids:
             continue
         candidates = [p for p in sid_to_pages[sid] if p not in assigned_pages]
         if candidates:
-            best = min(candidates, key=lambda p: len(page_to_matched_ids.get(p, [])))
+            best = min(candidates, key=lambda p: len(page_to_matched.get(p, [])))
             assigned_pages[best] = sid
             assigned_ids[sid] = best
 
     unassigned_pages = sorted(i for i in range(n_pages) if i not in assigned_pages)
     unassigned_ids = [sid for sid in index_ids if sid not in assigned_ids]
-    if unassigned_pages and unassigned_ids:
-        for pg, sid in zip(unassigned_pages, unassigned_ids):
-            assigned_pages[pg] = sid
-            assigned_ids[sid] = pg
+    for pg, sid in zip(unassigned_pages, unassigned_ids):
+        assigned_pages[pg] = sid
+        assigned_ids[sid] = pg
 
-    result: Dict[int, Tuple[str, str, str]] = {}
+    result = {}
     for pg_idx, sid in assigned_pages.items():
         title, discipline = sheet_index_map[sid]
         result[pg_idx] = (sid, title, discipline)
-
-    logger.info(f"Page matching: {len(result)}/{len(index_ids)} index entries mapped")
+    logger.info(f"  Page matching: {len(result)}/{len(index_ids)} index entries mapped")
     return result
 
 
 # ════════════════════════════════════════════════════════════════════════════════
-# Main entry point — replaces build_sheet_index + extract_tables_from_sheets
+# Main entry point
 # ════════════════════════════════════════════════════════════════════════════════
 
 _KEEP_CATEGORIES = {
@@ -290,16 +429,14 @@ _KEEP_CATEGORIES = {
 def extract_sheets_and_tables(
     classification: DocumentClassificationResult,
 ) -> Tuple[List[SheetInfo], List[ExtractedTable], List[ExtractedScheduleRow]]:
-    """Combined Step 2a: sheet index + table extraction using Gemini Flash.
+    """Combined Step 2a: img2table detection → Gemini filter → Gemini extraction.
 
-    Sends drawing page images in batches of 5 to Gemini Flash.
-    4 parallel workers. One prompt handles both sheet index and tables.
-
-    Returns: (sheets, tables, schedule_rows)
+    Phase 1: img2table (no OCR, <1s/page) detects table bboxes at 150 DPI
+    Phase 2: Crops at 150 DPI sent to Gemini Flash 5-at-a-time to filter noise
+    Phase 3: Confirmed tables re-cropped at 300 DPI, sent to Gemini Flash for extraction
     """
     client = _get_genai_client()
 
-    # Filter to drawing + spec files
     kept_files = [f for f in classification.files if f.categories & _KEEP_CATEGORIES]
     drawing_files = [f for f in kept_files if DocumentCategory.CONSTRUCTION_DRAWINGS in f.categories]
 
@@ -307,76 +444,188 @@ def extract_sheets_and_tables(
         logger.warning("No drawing files found")
         return [], [], []
 
-    logger.info(f"Step 2a: {len(drawing_files)} drawing files, sending pages in batches of {BATCH_SIZE}")
-
-    # Collect all drawing pages with images
     all_pages: List[Tuple[ClassifiedFile, PageInfo]] = []
-    batch_items: List[Tuple[int, bytes]] = []  # (global_page_number, jpeg_bytes)
-
     for cf in drawing_files:
         for page in cf.pages:
             all_pages.append((cf, page))
-            if page.image_bytes:
-                batch_items.append((page.global_page_number, page.image_bytes))
 
-    logger.info(f"  {len(batch_items)} pages with images to process")
+    pdf_bytes_map = classification.raw_pdf_bytes
+    logger.info(f"Step 2a: {len(all_pages)} drawing pages from {len(drawing_files)} files")
 
-    # Split into batches of BATCH_SIZE
-    batches = [batch_items[i:i + BATCH_SIZE] for i in range(0, len(batch_items), BATCH_SIZE)]
-    logger.info(f"  {len(batches)} batches, {MAX_WORKERS} parallel workers")
+    # ── Phase 1: img2table bbox detection ────────────────────────────────
+    logger.info(f"  Phase 1: img2table detection at {DETECT_DPI} DPI...")
 
-    # Process batches in parallel
-    all_sheet_index = []
-    all_raw_tables = []
+    all_detections = []  # list of {global_page, bbox, page_w, page_h, local_page, filename}
 
-    def _run_batch(batch_idx, batch):
-        logger.info(f"  Batch {batch_idx + 1}/{len(batches)}: {len(batch)} pages")
-        result = _process_batch(client, batch)
-        logger.info(
-            f"  Batch {batch_idx + 1} done: "
-            f"{len(result.get('sheet_index', []))} index entries, "
-            f"{len(result.get('tables', []))} tables"
-        )
-        return result
+    def _detect_one(cf, page):
+        pdf_bytes = pdf_bytes_map.get(cf.filename)
+        if not pdf_bytes:
+            return []
+        return _detect_bboxes_on_page(pdf_bytes, page.page_number, page.global_page_number)
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+    with ThreadPoolExecutor(max_workers=WORKERS) as executor:
         futures = {
-            executor.submit(_run_batch, i, batch): i
-            for i, batch in enumerate(batches)
+            executor.submit(_detect_one, cf, page): (cf, page)
+            for cf, page in all_pages
         }
         for future in as_completed(futures):
-            batch_idx = futures[future]
+            cf, page = futures[future]
             try:
-                result = future.result()
-                all_sheet_index.extend(result.get("sheet_index", []))
-                all_raw_tables.extend(result.get("tables", []))
+                dets = future.result()
+                for d in dets:
+                    d["local_page"] = page.page_number
+                    d["filename"] = cf.filename
+                all_detections.extend(dets)
             except Exception as e:
-                logger.error(f"  Batch {batch_idx + 1} failed: {e}")
+                logger.error(f"  Detection failed page {page.global_page_number}: {e}")
 
-    logger.info(f"  All batches done: {len(all_sheet_index)} index entries, {len(all_raw_tables)} raw tables")
+    logger.info(f"  Phase 1 done: {len(all_detections)} candidate regions on {len(set(d['global_page'] for d in all_detections))} pages")
+
+    if not all_detections:
+        logger.warning("  No table regions detected")
+        return _build_sheets_only(all_pages, {}, drawing_files), [], []
+
+    # ── Phase 2: Gemini Flash filtering ──────────────────────────────────
+    logger.info(f"  Phase 2: Filtering {len(all_detections)} crops with Gemini Flash...")
+
+    # Render 150 DPI crops for filtering
+    filter_crops = []  # (crop_idx, jpeg_bytes)
+    for i, det in enumerate(all_detections):
+        pdf_bytes = pdf_bytes_map.get(det["filename"])
+        if not pdf_bytes:
+            continue
+        crop = _crop_from_page(pdf_bytes, det["local_page"], det["bbox"], DETECT_DPI)
+        filter_crops.append((i, crop))
+
+    # Batch and filter in parallel
+    filter_batches = [filter_crops[i:i + FILTER_BATCH] for i in range(0, len(filter_crops), FILTER_BATCH)]
+    crop_types = {}  # crop_idx → type
+
+    def _run_filter(batch_idx, batch):
+        results = _filter_batch(client, batch)
+        return results
+
+    with ThreadPoolExecutor(max_workers=WORKERS) as executor:
+        futures = {executor.submit(_run_filter, i, b): i for i, b in enumerate(filter_batches)}
+        for future in as_completed(futures):
+            try:
+                results = future.result()
+                for crop_idx, crop_type in results:
+                    crop_types[crop_idx] = crop_type
+            except Exception as e:
+                batch_idx = futures[future]
+                logger.error(f"  Filter batch {batch_idx} failed: {e}")
+                # Keep all on failure
+                for idx, _ in filter_batches[batch_idx]:
+                    crop_types[idx] = "table"
+
+    # Keep only tables and sheet_index
+    kept = [(i, all_detections[i], crop_types.get(i, "table"))
+            for i in range(len(all_detections))
+            if crop_types.get(i, "table") in ("table", "sheet_index")]
+    discarded = len(all_detections) - len(kept)
+    logger.info(f"  Phase 2 done: {len(kept)} tables kept, {discarded} filtered out")
+
+    # ── Phase 3: Gemini Flash extraction at 300 DPI ──────────────────────
+    logger.info(f"  Phase 3: Extracting {len(kept)} tables at {CROP_DPI} DPI...")
+
+    # Render 300 DPI crops
+    extract_crops = []  # (crop_idx, jpeg_bytes, global_page, crop_type)
+    for crop_idx, det, crop_type in kept:
+        pdf_bytes = pdf_bytes_map.get(det["filename"])
+        if not pdf_bytes:
+            continue
+        crop = _crop_from_page(pdf_bytes, det["local_page"], det["bbox"], CROP_DPI)
+        extract_crops.append((crop_idx, crop, det["global_page"], crop_type))
+
+    # Batch and extract in parallel
+    extract_batches = [extract_crops[i:i + EXTRACT_BATCH] for i in range(0, len(extract_crops), EXTRACT_BATCH)]
+
+    all_sheet_index_rows = []
+    all_raw_tables = []  # (global_page, crop_type, parsed_dict)
+
+    def _run_extract(batch_idx, batch):
+        batch_for_api = [(idx, crop_bytes) for idx, crop_bytes, _, _ in batch]
+        results = _extract_batch(client, batch_for_api)
+        return [(batch[min(i, len(batch)-1)][2], batch[min(i, len(batch)-1)][3], parsed)
+                for i, (_, parsed) in enumerate(results)]
+
+    with ThreadPoolExecutor(max_workers=WORKERS) as executor:
+        futures = {executor.submit(_run_extract, i, b): i for i, b in enumerate(extract_batches)}
+        for future in as_completed(futures):
+            try:
+                results = future.result()
+                for gpn, ctype, parsed in results:
+                    if ctype == "sheet_index":
+                        for row in parsed.get("rows", []):
+                            if isinstance(row, dict):
+                                all_sheet_index_rows.append(row)
+                        logger.info(f"    Page {gpn}: sheet index → {len(parsed.get('rows', []))} entries")
+                    else:
+                        all_raw_tables.append((gpn, ctype, parsed))
+                        logger.info(f"    Page {gpn}: {parsed.get('table_title', 'table')} → {len(parsed.get('rows', []))} rows")
+            except Exception as e:
+                logger.error(f"  Extract batch failed: {e}")
+
+    logger.info(f"  Phase 3 done: {len(all_sheet_index_rows)} index entries, {len(all_raw_tables)} tables")
 
     # ── Build sheet index map ────────────────────────────────────────────
     sheet_index_map: Dict[str, Tuple[str, str]] = {}
-    for entry in all_sheet_index:
-        sid = str(entry.get("sheet_id", "")).strip().upper()
-        title = str(entry.get("title", "")).strip()
-        discipline = str(entry.get("discipline", "General")).strip().title()
+    for entry in all_sheet_index_rows:
+        sid = ""
+        title = ""
+        discipline = "General"
+        for key, val in entry.items():
+            key_upper = key.upper()
+            val_str = str(val).strip()
+            if any(k in key_upper for k in ("SHEET", "NUMBER", "NO", "ID", "MARK")):
+                sid = val_str.upper()
+            elif any(k in key_upper for k in ("TITLE", "NAME", "DESCRIPTION")):
+                title = val_str
+            elif any(k in key_upper for k in ("DISCIPLINE", "SECTION", "GROUP")):
+                discipline = val_str.title()
+        if not sid and len(entry) >= 2:
+            values = list(entry.values())
+            sid = str(values[0]).strip().upper()
+            title = str(values[1]).strip() if len(values) > 1 else ""
         if sid and re.match(r'^[A-Z]', sid):
+            if not discipline or discipline == "General":
+                discipline = _detect_discipline(sid, "")
             sheet_index_map[sid] = (title, discipline)
 
     if sheet_index_map:
         logger.info(f"  Sheet index: {len(sheet_index_map)} sheets mapped")
-    else:
-        logger.warning("  No sheet index found — using detected sheet IDs")
 
-    # ── Match pages to sheet index ───────────────────────────────────────
-    page_assignments: Dict[int, Tuple[str, str, str]] = {}
+    # ── Build SheetInfo + ExtractedTable ─────────────────────────────────
+    return _build_final_output(
+        all_pages, sheet_index_map, all_raw_tables, drawing_files, pdf_bytes_map,
+    )
+
+
+def _build_sheets_only(all_pages, sheet_index_map, drawing_files):
+    """Build SheetInfo objects without tables."""
+    sheets = []
+    for i, (cf, page) in enumerate(all_pages):
+        sheet_id = _detect_sheet_id(page.extracted_text, page.global_page_number)
+        discipline = _detect_discipline(sheet_id, page.extracted_text)
+        sheets.append(SheetInfo(
+            sheet_id=sheet_id, title="", discipline=discipline,
+            global_page_number=page.global_page_number,
+            source_file=cf.filename, extracted_text=page.extracted_text,
+            image_bytes=page.image_bytes, tables=[],
+        ))
+    return sheets
+
+
+def _build_final_output(all_pages, sheet_index_map, all_raw_tables, drawing_files, pdf_bytes_map):
+    """Build SheetInfo objects, ExtractedTables, and schedule rows."""
+    # Match pages to index
+    page_assignments = {}
     if sheet_index_map:
-        index_page_idxs = {0}  # Assume page 0 is the title sheet
-        page_assignments = _match_pages_to_index(all_pages, sheet_index_map, index_page_idxs)
+        page_assignments = _match_pages_to_index(all_pages, sheet_index_map, {0})
 
-    # ── Build SheetInfo objects ──────────────────────────────────────────
-    sheets: List[SheetInfo] = []
+    # Build SheetInfo
+    sheets = []
     for i, (cf, page) in enumerate(all_pages):
         if i in page_assignments:
             sheet_id, title, discipline = page_assignments[i]
@@ -384,74 +633,60 @@ def extract_sheets_and_tables(
             sheet_id = _detect_sheet_id(page.extracted_text, page.global_page_number)
             title = ""
             discipline = _detect_discipline(sheet_id, page.extracted_text)
-
         sheets.append(SheetInfo(
-            sheet_id=sheet_id,
-            title=title,
-            discipline=discipline,
+            sheet_id=sheet_id, title=title, discipline=discipline,
             global_page_number=page.global_page_number,
-            source_file=cf.filename,
-            extracted_text=page.extracted_text,
-            image_bytes=page.image_bytes,
-            tables=[],
+            source_file=cf.filename, extracted_text=page.extracted_text,
+            image_bytes=page.image_bytes, tables=[],
         ))
 
     logger.info(f"  Built {len(sheets)} SheetInfo objects")
-
-    # Log discipline breakdown
-    disciplines: Dict[str, int] = {}
+    disciplines = {}
     for s in sheets:
         disciplines[s.discipline] = disciplines.get(s.discipline, 0) + 1
     for disc, count in sorted(disciplines.items()):
-        logger.info(f"    {disc}: {count} sheets")
+        logger.info(f"    {disc}: {count}")
 
-    # ── Build ExtractedTable objects ─────────────────────────────────────
-    # Map global_page_number → sheet for attaching tables
-    pg_to_sheet: Dict[int, SheetInfo] = {s.global_page_number: s for s in sheets}
+    # Build ExtractedTable
+    pg_to_sheet = {s.global_page_number: s for s in sheets}
+    all_tables = []
 
-    all_tables: List[ExtractedTable] = []
-    for raw_t in all_raw_tables:
-        headers = raw_t.get("headers", [])
-        rows = raw_t.get("rows", [])
-        if not rows:
-            continue
+    for gpn, ctype, parsed in all_raw_tables:
+        table_list = [parsed] if isinstance(parsed, dict) else parsed if isinstance(parsed, list) else []
+        for t_data in table_list:
+            if not isinstance(t_data, dict):
+                continue
+            headers = t_data.get("headers", [])
+            rows = t_data.get("rows", [])
+            if not rows:
+                continue
+            clean_rows = [r for r in rows if isinstance(r, dict) and any(str(v).strip() for v in r.values())]
+            if not clean_rows:
+                continue
+            sheet = pg_to_sheet.get(gpn)
+            sheet_id = sheet.sheet_id if sheet else f"PAGE-{gpn}"
+            stype = t_data.get("schedule_type", ctype or "other")
+            table = ExtractedTable(
+                page_number=gpn, sheet_id=sheet_id, schedule_type=stype,
+                headers=headers, rows=clean_rows, confidence=0.90,
+            )
+            all_tables.append(table)
+            if sheet:
+                sheet.tables.append(table)
 
-        # Filter empty rows
-        clean_rows = [r for r in rows if isinstance(r, dict) and any(str(v).strip() for v in r.values())]
-        if not clean_rows:
-            continue
-
-        pg_num = raw_t.get("page_global", -1)
-        sheet = pg_to_sheet.get(pg_num)
-        sheet_id = sheet.sheet_id if sheet else f"PAGE-{pg_num}"
-
-        table = ExtractedTable(
-            page_number=pg_num,
-            sheet_id=sheet_id,
-            schedule_type=raw_t.get("schedule_type", "other"),
-            headers=headers,
-            rows=clean_rows,
-            confidence=0.90,
-        )
-        all_tables.append(table)
-        if sheet:
-            sheet.tables.append(table)
-
-    logger.info(f"  Extracted {len(all_tables)} tables total")
-    type_counts: Dict[str, int] = {}
+    logger.info(f"  Extracted {len(all_tables)} tables")
+    type_counts = {}
     for t in all_tables:
         type_counts[t.schedule_type] = type_counts.get(t.schedule_type, 0) + 1
     for stype, count in sorted(type_counts.items()):
         logger.info(f"    {stype}: {count}")
 
-    # ── Convert to schedule rows ─────────────────────────────────────────
     rows = tables_to_schedule_rows(all_tables)
-
     return sheets, all_tables, rows
 
 
 # ════════════════════════════════════════════════════════════════════════════════
-# Schedule row conversion (unchanged)
+# Schedule row conversion
 # ════════════════════════════════════════════════════════════════════════════════
 
 _MARK_HEADERS = {
@@ -461,17 +696,14 @@ _MARK_HEADERS = {
     "CKT", "CIRCUIT", "FIXTURE",
 }
 
-
-def _find_mark_column(headers: List[str]) -> Optional[int]:
+def _find_mark_column(headers):
     for i, h in enumerate(headers):
         if h.upper().strip() in _MARK_HEADERS:
             return i
     return 0
 
-
-def tables_to_schedule_rows(tables: List[ExtractedTable]) -> List[ExtractedScheduleRow]:
-    """Flatten tables into individual rows for downstream linking."""
-    rows: List[ExtractedScheduleRow] = []
+def tables_to_schedule_rows(tables):
+    rows = []
     for table in tables:
         if table.schedule_type in ("unknown",):
             continue
@@ -482,39 +714,27 @@ def tables_to_schedule_rows(tables: List[ExtractedTable]) -> List[ExtractedSched
                 mark_header = table.headers[mark_col]
                 mark = row_data.get(mark_header, "").strip()
             rows.append(ExtractedScheduleRow(
-                schedule_type=table.schedule_type,
-                row_data=row_data,
-                mark=mark,
-                page_number=table.page_number,
-                sheet_id=table.sheet_id,
+                schedule_type=table.schedule_type, row_data=row_data,
+                mark=mark, page_number=table.page_number, sheet_id=table.sheet_id,
             ))
     logger.info(f"  Converted {len(rows)} schedule rows from {len(tables)} tables")
     return rows
 
 
 # ════════════════════════════════════════════════════════════════════════════════
-# Schedule rows → EstimateItems (unchanged)
+# Schedule rows → EstimateItems
 # ════════════════════════════════════════════════════════════════════════════════
 
-_SCHEDULE_TYPE_TO_TRADE: Dict[str, str] = {
-    "door": "Doors and Windows",
-    "window": "Doors and Windows",
-    "finish": "Painting",
-    "fixture": "Plumbing",
-    "plumbing_fixture": "Plumbing",
-    "equipment": "General Requirements",
-    "panel": "Electrical",
-    "lighting": "Electrical",
-    "hardware": "Doors and Windows",
-    "ventilation": "HVAC and Sheet Metals",
-    "mechanical": "HVAC and Sheet Metals",
+_SCHEDULE_TYPE_TO_TRADE = {
+    "door": "Doors and Windows", "window": "Doors and Windows",
+    "finish": "Painting", "fixture": "Plumbing", "plumbing_fixture": "Plumbing",
+    "equipment": "General Requirements", "panel": "Electrical",
+    "lighting": "Electrical", "hardware": "Doors and Windows",
+    "ventilation": "HVAC and Sheet Metals", "mechanical": "HVAC and Sheet Metals",
 }
 
-
-def schedule_rows_to_estimate_items(
-    schedule_rows: List[ExtractedScheduleRow],
-) -> List[EstimateItem]:
-    items: List[EstimateItem] = []
+def schedule_rows_to_estimate_items(schedule_rows):
+    items = []
     for row in schedule_rows:
         trade = _SCHEDULE_TYPE_TO_TRADE.get(row.schedule_type, "General Requirements")
         desc_parts = []
@@ -539,18 +759,11 @@ def schedule_rows_to_estimate_items(
             if val:
                 notes_parts.append(val)
         item = EstimateItem(
-            trade=trade,
-            item_description=description,
-            qty=1.0,
-            unit="EA",
-            extraction_method="schedule_parse",
-            confidence=0.90,
-            source_page=row.page_number,
-            sheet_id=row.sheet_id,
-            material_spec="; ".join(material_parts),
-            schedule_mark=row.mark,
-            notes="; ".join(notes_parts),
-            source=f"schedule:{row.schedule_type}",
+            trade=trade, item_description=description, qty=1.0, unit="EA",
+            extraction_method="schedule_parse", confidence=0.90,
+            source_page=row.page_number, sheet_id=row.sheet_id,
+            material_spec="; ".join(material_parts), schedule_mark=row.mark,
+            notes="; ".join(notes_parts), source=f"schedule:{row.schedule_type}",
         )
         items.append(item)
     logger.info(f"  Created {len(items)} estimate items from schedule rows")
