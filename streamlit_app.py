@@ -1,9 +1,9 @@
 """Streamlit UI — QTO Pipeline.
 
 Uses a background thread so Streamlit reruns cannot interrupt the pipeline.
-A module-level lock prevents duplicate runs.
+Results are persisted to /tmp so they survive websocket disconnects.
 """
-import logging, os, sys, time, traceback, threading
+import json, logging, os, sys, time, traceback, threading
 import streamlit as st
 import pandas as pd
 
@@ -34,15 +34,58 @@ st.title("Construction QTO Pipeline")
 logging.basicConfig(level=logging.INFO, format="[%(name)s] %(message)s")
 logger = logging.getLogger(__name__)
 
+RESULTS_FILE = "/tmp/pipeline_results.json"
+
+
+# ── Results persistence ──────────────────────────────────────────────────────
+
+def _save_results(state):
+    """Save pipeline results to disk so they survive websocket drops."""
+    try:
+        data = {
+            "step1_time": state.get("step1_time", 0),
+            "step2a_time": state.get("step2a_time", 0),
+            "step2d_time": state.get("step2d_time", 0),
+            "step3_time": state.get("step3_time", 0),
+            "n_sheets": state.get("n_sheets", 0),
+            "n_tables": state.get("n_tables", 0),
+            "n_drawing_items": state.get("n_drawing_items", 0),
+            "items": [
+                {
+                    "trade": i.trade,
+                    "item_description": i.item_description,
+                    "qty": i.qty,
+                    "unit": i.unit,
+                    "schedule_mark": i.schedule_mark or "",
+                    "confidence": i.confidence,
+                }
+                for i in state.get("final_items", [])
+            ],
+        }
+        with open(RESULTS_FILE, "w") as f:
+            json.dump(data, f)
+        logger.info(f"Results saved to {RESULTS_FILE}")
+    except Exception as e:
+        logger.error(f"Failed to save results: {e}")
+
+
+def _load_results():
+    """Load previously saved results if they exist."""
+    try:
+        if os.path.exists(RESULTS_FILE):
+            with open(RESULTS_FILE, "r") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return None
+
 
 # ── Background runner ────────────────────────────────────────────────────────
-# Module-level state survives Streamlit reruns.
-# Lock prevents duplicate pipeline threads.
 
 _pipeline_lock = threading.Lock()
 _pipeline_state = {
-    "status": "idle",     # idle | running | complete | error
-    "run_id": None,       # which run is active
+    "status": "idle",
+    "run_id": None,
 }
 
 
@@ -90,6 +133,9 @@ def _run_pipeline_thread(run_id, file_data):
         state["final_items"] = final_items
         state["status"] = "complete"
 
+        # Save to disk so results survive websocket drops
+        _save_results(state)
+
     except Exception as e:
         state["status"] = "error"
         state["error"] = str(e)
@@ -108,15 +154,12 @@ def on_run():
     files = st.session_state.get("uploader")
     if not files:
         return
-
-    # Prevent duplicate runs — only one pipeline at a time
     if not _pipeline_lock.acquire(blocking=False):
-        return  # Already running
+        return
 
     file_data = [(f.name, f.read()) for f in files]
     run_id = f"run_{time.time()}"
 
-    # Reset state
     _pipeline_state.update({
         "status": "running",
         "run_id": run_id,
@@ -126,6 +169,10 @@ def on_run():
         "step2d_done": False, "step3_done": False,
         "error": None, "traceback": None, "final_items": None,
     })
+
+    # Remove old results file
+    if os.path.exists(RESULTS_FILE):
+        os.unlink(RESULTS_FILE)
 
     thread = threading.Thread(
         target=_run_pipeline_thread,
@@ -147,31 +194,22 @@ with st.sidebar:
         disabled=is_running or not st.session_state.get("uploader"),
     )
 
-# ── Pipeline progress / results ──────────────────────────────────────────────
-status = _pipeline_state["status"]
 
-if status == "error":
-    st.error(f"Pipeline failed: {_pipeline_state['error']}")
-    st.code(_pipeline_state["traceback"])
-    # Allow re-run
-    if st.button("Reset"):
-        _pipeline_state["status"] = "idle"
-        st.rerun()
+# ── Helper to display results ────────────────────────────────────────────────
 
-elif status == "complete":
-    # Show step timings
-    st.success(f"Step 1: Classification ({_pipeline_state['step1_time']:.0f}s)")
-    st.success(f"Step 2a: {_pipeline_state['n_sheets']} sheets, {_pipeline_state['n_tables']} tables ({_pipeline_state['step2a_time']:.0f}s)")
-    st.success(f"Step 2d: {_pipeline_state['n_drawing_items']} items ({_pipeline_state['step2d_time']:.0f}s)")
-    st.success(f"Step 3: Vision done ({_pipeline_state['step3_time']:.0f}s)")
-    total = _pipeline_state["step1_time"] + _pipeline_state["step2a_time"] + _pipeline_state["step2d_time"] + _pipeline_state["step3_time"]
+def _show_results_from_saved(data):
+    """Display results from saved JSON data."""
+    st.success(f"Step 1: Classification ({data['step1_time']:.0f}s)")
+    st.success(f"Step 2a: {data['n_sheets']} sheets, {data['n_tables']} tables ({data['step2a_time']:.0f}s)")
+    st.success(f"Step 2d: {data['n_drawing_items']} items ({data['step2d_time']:.0f}s)")
+    st.success(f"Step 3: Vision done ({data['step3_time']:.0f}s)")
+    total = data["step1_time"] + data["step2a_time"] + data["step2d_time"] + data["step3_time"]
     st.success(f"Pipeline complete! Total: {total:.0f}s")
 
-    # Results
-    final_items = _pipeline_state["final_items"]
+    items = data["items"]
     st.divider()
-    n_total = len(final_items)
-    n_qty = sum(1 for i in final_items if i.qty is not None)
+    n_total = len(items)
+    n_qty = sum(1 for i in items if i.get("qty") is not None)
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Total Items", n_total)
@@ -179,15 +217,44 @@ elif status == "complete":
     c3.metric("Manual Review", n_total - n_qty)
 
     st.dataframe(pd.DataFrame([
-        {"Trade": i.trade, "Description": i.item_description,
-         "Qty": i.qty if i.qty is not None else "", "Unit": i.unit,
-         "Mark": i.schedule_mark or "",
-         "Confidence": f"{i.confidence:.0%}" if i.confidence else ""}
-        for i in final_items
+        {"Trade": i["trade"], "Description": i["item_description"],
+         "Qty": i["qty"] if i["qty"] is not None else "", "Unit": i["unit"],
+         "Mark": i.get("schedule_mark", ""),
+         "Confidence": f"{i['confidence']:.0%}" if i.get("confidence") else ""}
+        for i in items
     ]), use_container_width=True, hide_index=True, height=600)
 
+
+# ── Pipeline progress / results ──────────────────────────────────────────────
+status = _pipeline_state["status"]
+
+if status == "error":
+    st.error(f"Pipeline failed: {_pipeline_state['error']}")
+    st.code(_pipeline_state["traceback"])
+    if st.button("Reset"):
+        _pipeline_state["status"] = "idle"
+        st.rerun()
+
+elif status == "complete":
+    # Show from memory (thread just finished)
+    _show_results_from_saved({
+        "step1_time": _pipeline_state["step1_time"],
+        "step2a_time": _pipeline_state["step2a_time"],
+        "step2d_time": _pipeline_state["step2d_time"],
+        "step3_time": _pipeline_state["step3_time"],
+        "n_sheets": _pipeline_state["n_sheets"],
+        "n_tables": _pipeline_state["n_tables"],
+        "n_drawing_items": _pipeline_state["n_drawing_items"],
+        "items": [
+            {"trade": i.trade, "item_description": i.item_description,
+             "qty": i.qty, "unit": i.unit,
+             "schedule_mark": i.schedule_mark or "",
+             "confidence": i.confidence}
+            for i in _pipeline_state["final_items"]
+        ],
+    })
+
 elif status == "running":
-    # Count completed steps for progress bar
     done = sum([
         _pipeline_state.get("step1_done", False),
         _pipeline_state.get("step2a_done", False),
@@ -199,7 +266,6 @@ elif status == "running":
     st.warning(f"Pipeline running... ({elapsed}s elapsed)")
     st.progress(done / 4, text=_pipeline_state.get("step_label", "Starting..."))
 
-    # Show completed steps
     if _pipeline_state.get("step1_done"):
         st.success(f"Step 1: Classification ({_pipeline_state['step1_time']:.0f}s)")
     if _pipeline_state.get("step2a_done"):
@@ -207,6 +273,12 @@ elif status == "running":
     if _pipeline_state.get("step2d_done"):
         st.success(f"Step 2d: {_pipeline_state['n_drawing_items']} items ({_pipeline_state['step2d_time']:.0f}s)")
 
-    # Poll every 3 seconds
     time.sleep(3)
     st.rerun()
+
+else:
+    # Idle — check if there are saved results from a previous run
+    saved = _load_results()
+    if saved and saved.get("items"):
+        st.info("Showing results from last pipeline run:")
+        _show_results_from_saved(saved)
