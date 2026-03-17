@@ -188,13 +188,20 @@ def classify_file_with_gemini(
 
     drawing_pages: List[int] = []
 
-    # Large files → skip File Search (hangs on upload), go straight to vision
+    # Large files → skip File Search, use Files API
     if file_size > MAX_FILE_SEARCH_BYTES:
         logger.info(
             f"Classifying {cf.filename} ({total} pages, {file_size/1024/1024:.1f} MB) "
-            f"with vision (too large for File Search)"
+            f"with Files API (too large for File Search)"
         )
-        cats, drawing_pages = _classify_with_vision(cf, cf.filename, raw_pdf_bytes=file_bytes)
+        cats, drawing_pages = _classify_single_pdf_with_files_api(
+            file_bytes, cf.filename, total_pages=total
+        )
+    # Image-heavy PDFs (drawings) → use Files API (File Search hangs on these)
+    elif is_pdf and _is_image_heavy_pdf(cf):
+        cats, drawing_pages = _classify_single_pdf_with_files_api(
+            file_bytes, cf.filename, total_pages=total
+        )
     elif is_pdf and total > MAX_PAGES_FOR_SINGLE_UPLOAD:
         logger.info(f"Classifying {cf.filename} ({total} pages) with Gemini File Search…")
         # Split PDF into 3 equal sub-PDFs, classify each chunk separately
@@ -312,11 +319,7 @@ def _classify_single_pdf_with_gemini(
         )
 
         logger.info(f"  Uploading & indexing {label}…")
-        indexing_start = time.time()
-        MAX_INDEXING_WAIT = 120  # 2 minutes max, then fall back to vision
         while not operation.done:
-            if time.time() - indexing_start > MAX_INDEXING_WAIT:
-                raise TimeoutError(f"Indexing timed out after {MAX_INDEXING_WAIT}s for {label}")
             time.sleep(3)
             operation = client.operations.get(operation)
         logger.info(f"  Indexing complete for {label}")
@@ -353,6 +356,100 @@ def _classify_single_pdf_with_gemini(
                 client.file_search_stores.delete(name=store_name, config={"force": True})
             except Exception as e:
                 logger.warning(f"  Failed to delete store {store_name}: {e}")
+
+
+def _classify_single_pdf_with_files_api(
+    file_bytes: bytes,
+    label: str,
+    total_pages: int = 0,
+) -> Tuple[Set[DocumentCategory], List[int]]:
+    """Upload PDF via Files API and classify with generateContent.
+
+    Unlike File Search (which hangs on image-heavy PDFs), the Files API
+    reliably processes any PDF. The model sees the full document content
+    including images, diagrams, and drawings.
+
+    Limit: 50 MB per PDF (Files API cap).
+    """
+    client = get_genai_client()
+    model = settings.CLASSIFICATION_MODEL
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp.write(file_bytes)
+        tmp_path = tmp.name
+
+    try:
+        logger.info(f"  Uploading {label} via Files API ({len(file_bytes)/1024/1024:.1f} MB)…")
+        uploaded = client.files.upload(file=tmp_path)
+
+        # Poll until ACTIVE
+        max_wait = 120
+        waited = 0
+        while uploaded.state.name == "PROCESSING" and waited < max_wait:
+            time.sleep(3)
+            waited += 3
+            uploaded = client.files.get(name=uploaded.name)
+
+        if uploaded.state.name != "ACTIVE":
+            raise RuntimeError(f"Files API upload failed: state={uploaded.state.name}")
+
+        logger.info(f"  Files API upload ACTIVE for {label}")
+
+        # Classify — pass the uploaded file directly to generateContent
+        response = client.models.generate_content(
+            model=model,
+            contents=[
+                types.Content(
+                    parts=[
+                        types.Part.from_uri(
+                            file_uri=uploaded.uri,
+                            mime_type="application/pdf",
+                        ),
+                        types.Part.from_text(
+                            text=f"Classify this document ({total_pages} pages): {label}\n\n{CLASSIFICATION_PROMPT}"
+                        ),
+                    ]
+                )
+            ],
+            config=types.GenerateContentConfig(temperature=0),
+        )
+
+        raw = response.text or "{}"
+        logger.info(f"  Gemini raw response for {label}: {raw[:300]}")
+
+        return _parse_classification_response(raw, total_pages)
+
+    except Exception as e:
+        logger.error(f"Files API classification failed for {label}: {e}")
+        return set(), []
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+        # Clean up uploaded file
+        try:
+            client.files.delete(name=uploaded.name)
+        except Exception:
+            pass
+
+
+def _is_image_heavy_pdf(cf: ClassifiedFile) -> bool:
+    """Check if a PDF is mostly images (low text density).
+
+    Image-heavy PDFs (like construction drawings) cause File Search
+    to hang indefinitely. These should use Files API instead.
+    """
+    if not cf.pages:
+        return False
+    total_text = sum(len(p.extracted_text.strip()) for p in cf.pages)
+    avg_chars_per_page = total_text / len(cf.pages)
+    # Text-heavy PDFs (specs) typically have 1000+ chars/page
+    # Drawing PDFs typically have < 200 chars/page
+    is_heavy = avg_chars_per_page < 300
+    if is_heavy:
+        logger.info(
+            f"  {cf.filename}: image-heavy PDF ({avg_chars_per_page:.0f} chars/page avg) "
+            f"→ using Files API instead of File Search"
+        )
+    return is_heavy
 
 
 def _classify_with_vision(
