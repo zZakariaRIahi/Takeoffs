@@ -10,7 +10,6 @@
     h1 { font-size: 1.8rem; margin-bottom: 1.5rem; color: #fff; }
     .card { background: #1a1d27; border-radius: 12px; padding: 1.5rem; margin-bottom: 1rem; }
 
-    /* Upload */
     .upload-area { border: 2px dashed #444; border-radius: 12px; padding: 2rem; text-align: center; cursor: pointer; transition: border-color 0.2s; }
     .upload-area:hover, .upload-area.dragover { border-color: #4a9eff; }
     .upload-area input { display: none; }
@@ -19,9 +18,12 @@
     .btn:disabled { opacity: 0.4; cursor: not-allowed; }
     .btn-primary { background: #4a9eff; color: #fff; margin-top: 1rem; }
     .btn-primary:hover:not(:disabled) { background: #3a8eef; }
+    .btn-success { background: #4caf50; color: #fff; margin-top: 1rem; }
+    .btn-success:hover:not(:disabled) { background: #3c9f40; }
     .btn-danger { background: #ff4a4a; color: #fff; margin-top: 0.5rem; font-size: 0.85rem; padding: 0.4rem 1rem; }
+    .btn-danger:hover { background: #e03a3a; }
+    .upload-status { margin-top: 0.5rem; font-size: 0.85rem; color: #4a9eff; min-height: 1.2em; }
 
-    /* Progress */
     #progress { display: none; }
     .progress-bar-bg { background: #2a2d37; border-radius: 8px; height: 12px; overflow: hidden; margin: 1rem 0; }
     .progress-bar-fill { background: #4a9eff; height: 100%; transition: width 0.5s ease; border-radius: 8px; }
@@ -30,12 +32,10 @@
     .step-active { background: #1a2a3a; color: #4a9eff; }
     .elapsed { font-size: 0.85rem; color: #999; margin-bottom: 0.5rem; }
 
-    /* Error */
     #error { display: none; }
     .error-box { background: #3a1a1a; color: #ff6b6b; border-radius: 8px; padding: 1rem; }
     .error-box pre { font-size: 0.75rem; overflow-x: auto; margin-top: 0.5rem; color: #cc8888; }
 
-    /* Results */
     #results { display: none; }
     .metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-bottom: 1rem; }
     .metric { background: #1a1d27; border-radius: 10px; padding: 1rem; text-align: center; }
@@ -43,8 +43,8 @@
     .metric-label { font-size: 0.8rem; color: #999; margin-top: 0.3rem; }
     .summary { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
     .summary .step-done { font-size: 0.8rem; }
+    .btn-row { display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap; }
 
-    /* Table */
     .table-wrap { overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
     th { background: #2a2d37; text-align: left; padding: 0.6rem 0.8rem; position: sticky; top: 0; color: #ccc; }
@@ -53,6 +53,34 @@
     .confidence-high { color: #4caf50; }
     .confidence-med { color: #ffa726; }
     .confidence-low { color: #ff5252; }
+
+    td.editable { position: relative; }
+    td.editable input { background: transparent; border: 1px solid transparent; color: #e0e0e0; width: 100%; padding: 2px 4px; font-size: 0.85rem; font-family: inherit; border-radius: 4px; }
+    td.editable input:focus { border-color: #4a9eff; outline: none; background: #2a2d37; }
+    td.editable input:hover { border-color: #444; }
+    td.editable-desc input { min-width: 200px; }
+
+    .row-actions { white-space: nowrap; }
+    .row-actions button { background: none; border: none; cursor: pointer; color: #ff5252; font-size: 0.8rem; padding: 2px 6px; }
+    .row-actions button:hover { color: #ff8888; }
+
+    #pricing { display: none; }
+    .pricing-status { margin-top: 0.5rem; font-size: 0.85rem; color: #4a9eff; min-height: 1.2em; }
+    .price-col { color: #4caf50; font-weight: 600; }
+    .citation-link { color: #4a9eff; font-size: 0.75rem; text-decoration: none; }
+    .citation-link:hover { text-decoration: underline; }
+
+    .job-history { margin-top: 1rem; }
+    .job-history h3 { font-size: 0.95rem; color: #999; margin-bottom: 0.5rem; }
+    .job-card { background: #1e2130; border-radius: 8px; padding: 0.7rem 1rem; margin-bottom: 0.5rem; display: flex; justify-content: space-between; align-items: center; cursor: pointer; transition: background 0.2s; }
+    .job-card:hover { background: #252840; }
+    .job-card .job-info { font-size: 0.85rem; }
+    .job-card .job-files { font-size: 0.75rem; color: #888; }
+    .job-card .job-status { font-size: 0.8rem; font-weight: 600; }
+    .job-status-complete { color: #4caf50; }
+    .job-status-running { color: #4a9eff; }
+    .job-status-queued { color: #ffa726; }
+    .job-status-error { color: #ff5252; }
   </style>
 </head>
 <body>
@@ -62,12 +90,14 @@
 <!-- Upload -->
 <div id="upload" class="card">
   <div class="upload-area" id="dropzone" onclick="document.getElementById('fileInput').click()">
-    <p style="font-size: 1.1rem; margin-bottom: 0.5rem;">Drop PDF files here or click to browse</p>
-    <p style="font-size: 0.85rem; color: #666;">Supports multiple PDFs (drawings + specifications)</p>
-    <input type="file" id="fileInput" accept=".pdf" multiple>
+    <p style="font-size: 1.1rem; margin-bottom: 0.5rem;">Drop files here or click to browse</p>
+    <p style="font-size: 0.85rem; color: #666;">PDF, CSV, XLSX, DOCX — no size limit</p>
+    <input type="file" id="fileInput" accept=".pdf,.csv,.xlsx,.xls,.docx,.doc" multiple>
     <div class="file-list" id="fileList"></div>
   </div>
+  <div class="upload-status" id="uploadStatus"></div>
   <button class="btn btn-primary" id="runBtn" disabled onclick="startPipeline()">Run Pipeline</button>
+  <div id="jobHistory" style="margin-top: 1rem;"></div>
 </div>
 
 <!-- Progress -->
@@ -76,6 +106,7 @@
   <div class="progress-bar-bg"><div class="progress-bar-fill" id="progressBar" style="width: 0%"></div></div>
   <div id="stepLabel" class="step step-active"></div>
   <div id="completedSteps"></div>
+  <button class="btn btn-danger" onclick="forceReset()" style="margin-top: 1rem;">Cancel & Start Over</button>
 </div>
 
 <!-- Error -->
@@ -85,11 +116,17 @@
     <p id="errorMsg"></p>
     <pre id="errorTrace"></pre>
   </div>
-  <button class="btn btn-danger" onclick="resetPipeline()">Reset</button>
+  <button class="btn btn-danger" onclick="forceReset()">Start Over</button>
 </div>
 
-<!-- Results -->
+<!-- Results (editable) -->
 <div id="results">
+  <div class="btn-row">
+    <button class="btn btn-success" id="pricingBtn" onclick="submitPricing()">Submit for Pricing</button>
+    <button class="btn btn-primary" onclick="addRow()" style="font-size:0.85rem;padding:0.5rem 1rem;">+ Add Row</button>
+    <button class="btn btn-danger" onclick="forceReset()" style="font-size:0.85rem;padding:0.5rem 1rem;">New Analysis</button>
+  </div>
+  <div class="pricing-status" id="pricingStatus"></div>
   <div class="summary" id="stepSummary"></div>
   <div class="metrics">
     <div class="metric"><div class="metric-value" id="mTotal">0</div><div class="metric-label">Total Items</div></div>
@@ -99,9 +136,38 @@
   <div class="card table-wrap">
     <table>
       <thead>
-        <tr><th>Trade</th><th>Description</th><th>Qty</th><th>Unit</th><th>Mark</th><th>Source</th><th>Confidence</th></tr>
+        <tr>
+          <th>Trade</th><th>Description</th><th>Qty</th><th>Unit</th>
+          <th>Mark</th><th>Method</th><th>Source</th><th>Review</th><th></th>
+        </tr>
       </thead>
       <tbody id="tableBody"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Priced Results -->
+<div id="pricing">
+  <div class="btn-row">
+    <button class="btn btn-primary" onclick="forceReset()">New Analysis</button>
+    <button class="btn btn-primary" onclick="exportCSV()" style="font-size:0.85rem;padding:0.5rem 1rem;">Export CSV</button>
+  </div>
+  <div class="summary" id="pricingSummary"></div>
+  <div class="metrics">
+    <div class="metric"><div class="metric-value" id="pTotal">0</div><div class="metric-label">Total Items</div></div>
+    <div class="metric"><div class="metric-value" id="pPriced">0</div><div class="metric-label">Priced</div></div>
+    <div class="metric"><div class="metric-value" id="pNotFound">0</div><div class="metric-label">Not Found</div></div>
+  </div>
+  <div class="card table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Trade</th><th>Description</th><th>Qty</th><th>Unit</th>
+          <th>Mat/Unit</th><th>Mat Total</th><th>Labor/Unit</th><th>Labor Total</th>
+          <th>Man HRs</th><th>Rate</th><th>Total</th><th>Notes</th>
+        </tr>
+      </thead>
+      <tbody id="pricingBody"></tbody>
     </table>
   </div>
 </div>
@@ -109,12 +175,25 @@
 <script>
 let selectedFiles = [];
 let pollTimer = null;
+let currentItems = [];  // holds the editable BOM items
+let pricedData = null;
+let currentJobId = null;  // tracks the current job
 
-// ── File handling ──
+const ALLOWED_EXT = ['.pdf','.csv','.xlsx','.xls','.docx','.doc'];
+const CONTENT_TYPES = {
+  '.pdf': 'application/pdf',
+  '.csv': 'text/csv',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.xls': 'application/vnd.ms-excel',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.doc': 'application/msword',
+};
+
 const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('fileInput');
 const fileList = document.getElementById('fileList');
 const runBtn = document.getElementById('runBtn');
+const uploadStatus = document.getElementById('uploadStatus');
 
 dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('dragover'); });
 dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
@@ -126,35 +205,63 @@ dropzone.addEventListener('drop', e => {
 fileInput.addEventListener('change', () => handleFiles(fileInput.files));
 
 function handleFiles(files) {
-  selectedFiles = Array.from(files).filter(f => f.name.endsWith('.pdf'));
-  fileList.textContent = selectedFiles.map(f => f.name).join(', ') || 'No PDFs selected';
+  selectedFiles = Array.from(files).filter(f => {
+    const ext = '.' + f.name.split('.').pop().toLowerCase();
+    return ALLOWED_EXT.includes(ext);
+  });
+  fileList.textContent = selectedFiles.map(f => `${f.name} (${(f.size/1024/1024).toFixed(1)} MB)`).join(', ') || 'No supported files selected';
   runBtn.disabled = selectedFiles.length === 0;
+  uploadStatus.textContent = '';
 }
 
-// ── Pipeline ──
 async function startPipeline() {
   if (selectedFiles.length === 0) return;
   runBtn.disabled = true;
 
-  const formData = new FormData();
-  selectedFiles.forEach(f => formData.append('files', f));
-
   try {
-    const resp = await fetch('/upload', { method: 'POST', body: formData });
-    const data = await resp.json();
-    if (resp.ok) {
+    // 1. Get signed URLs from backend
+    uploadStatus.textContent = 'Preparing upload...';
+    const filenames = selectedFiles.map(f => f.name);
+    const urlResp = await fetch('/get-upload-urls', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(filenames),
+    });
+    if (!urlResp.ok) throw new Error('Failed to get upload URLs');
+    const { session_id, urls } = await urlResp.json();
+
+    // 2. Upload each file directly to GCS
+    for (let i = 0; i < urls.length; i++) {
+      const file = selectedFiles[i];
+      const { url, content_type } = urls[i];
+      uploadStatus.textContent = `Uploading ${file.name} (${i+1}/${urls.length})...`;
+      const putResp = await fetch(url, {
+        method: 'PUT',
+        headers: { 'Content-Type': content_type },
+        body: file,
+      });
+      if (!putResp.ok) throw new Error(`Failed to upload ${file.name}`);
+    }
+
+    // 3. Tell backend to start pipeline (queued)
+    uploadStatus.textContent = 'Starting pipeline...';
+    const startResp = await fetch(`/start/${session_id}`, { method: 'POST' });
+    const startData = await startResp.json();
+    if (startResp.ok) {
+      currentJobId = startData.job_id;
+      window.location.hash = 'job=' + currentJobId;
       show('progress');
-      hide('upload');
-      hide('results');
-      hide('error');
+      hide('upload'); hide('results'); hide('error'); hide('pricing');
       startPolling();
     } else {
-      alert(data.error || 'Upload failed');
+      alert(startData.error || 'Failed to start pipeline');
       runBtn.disabled = false;
+      uploadStatus.textContent = '';
     }
   } catch (e) {
     alert('Upload failed: ' + e.message);
     runBtn.disabled = false;
+    uploadStatus.textContent = '';
   }
 }
 
@@ -166,107 +273,355 @@ function startPolling() {
 
 async function pollStatus() {
   try {
-    const resp = await fetch('/status');
+    const statusUrl = currentJobId ? `/status/${currentJobId}` : '/status';
+    const resp = await fetch(statusUrl);
     const s = await resp.json();
 
-    if (s.status === 'running') {
+    if (s.status === 'queued') {
+      hide('upload'); hide('error'); hide('results'); hide('pricing');
+      show('progress');
+      const pos = s.queue_position || 0;
+      document.getElementById('elapsed').textContent = `Queued — position #${pos} (waiting ${s.queue_elapsed || 0}s)`;
+      document.getElementById('progressBar').style.width = '0%';
+      document.getElementById('stepLabel').textContent = 'Waiting for current job to finish...';
+      document.getElementById('completedSteps').innerHTML = '';
+      if (!pollTimer) startPolling();
+
+    } else if (s.status === 'running') {
+      hide('upload'); hide('error'); hide('results'); hide('pricing');
+      show('progress');
       document.getElementById('elapsed').textContent = `Running... ${s.elapsed}s elapsed`;
-
-      const done = (s.step1_done ? 1 : 0) + (s.step2a_done ? 1 : 0) + (s.step2d_done ? 1 : 0) + (s.step3_done ? 1 : 0);
-      document.getElementById('progressBar').style.width = (done / 4 * 100) + '%';
+      const done = (s.step1_done?1:0) + (s.step2a_done?1:0) + (s.step2d_done?1:0) + (s.step3_done?1:0);
+      document.getElementById('progressBar').style.width = (done/4*100) + '%';
       document.getElementById('stepLabel').textContent = s.step_label;
-
       let steps = '';
       if (s.step1_done) steps += `<div class="step step-done">Step 1: Classification (${Math.round(s.step1_time)}s)</div>`;
       if (s.step2a_done) steps += `<div class="step step-done">Step 2a: ${s.n_sheets} sheets, ${s.n_tables} tables (${Math.round(s.step2a_time)}s)</div>`;
       if (s.step2d_done) steps += `<div class="step step-done">Step 2d: ${s.n_drawing_items} items (${Math.round(s.step2d_time)}s)</div>`;
       if (s.step3_done) steps += `<div class="step step-done">Step 3: Vision done (${Math.round(s.step3_time)}s)</div>`;
       document.getElementById('completedSteps').innerHTML = steps;
+      if (!pollTimer) startPolling();
 
     } else if (s.status === 'complete') {
-      clearInterval(pollTimer);
+      clearInterval(pollTimer); pollTimer = null;
       loadResults();
 
     } else if (s.status === 'error') {
-      clearInterval(pollTimer);
-      hide('progress');
+      clearInterval(pollTimer); pollTimer = null;
+      hide('progress'); hide('upload'); hide('results'); hide('pricing');
       show('error');
       document.getElementById('errorMsg').textContent = s.error;
       document.getElementById('errorTrace').textContent = s.traceback || '';
 
     } else if (s.status === 'idle') {
-      // Check for saved results
-      loadResults();
+      clearInterval(pollTimer); pollTimer = null;
+      const rr = await fetch('/results');
+      if (rr.ok) {
+        const data = await rr.json();
+        if (data.items && data.items.length > 0) { showResultsData(data); return; }
+      }
+      hide('progress'); hide('error'); hide('results'); hide('pricing');
+      show('upload');
     }
-  } catch (e) {
-    // Network error — keep polling
-  }
+  } catch (e) {}
 }
 
 async function loadResults() {
   try {
-    const resp = await fetch('/results');
+    const resultsUrl = currentJobId ? `/results/${currentJobId}` : '/results';
+    const resp = await fetch(resultsUrl);
     if (!resp.ok) return;
-    const data = await resp.json();
+    showResultsData(await resp.json());
+  } catch (e) {}
+}
 
-    hide('progress');
-    hide('upload');
-    hide('error');
-    show('results');
+function showResultsData(data) {
+  hide('progress'); hide('upload'); hide('error'); hide('pricing');
+  show('results');
 
-    // Summary
-    const total = Math.round(data.step1_time + data.step2a_time + data.step2d_time + data.step3_time);
-    document.getElementById('stepSummary').innerHTML = `
-      <div class="step step-done">Step 1: ${Math.round(data.step1_time)}s</div>
-      <div class="step step-done">Step 2a: ${data.n_sheets} sheets, ${data.n_tables} tables (${Math.round(data.step2a_time)}s)</div>
-      <div class="step step-done">Step 2d: ${data.n_drawing_items} items (${Math.round(data.step2d_time)}s)</div>
-      <div class="step step-done">Step 3: ${Math.round(data.step3_time)}s</div>
-      <div class="step step-done" style="background:#1a3a1a;font-weight:700">Total: ${total}s</div>
-    `;
+  const total = Math.round(data.step1_time + data.step2a_time + data.step2d_time + data.step3_time);
+  document.getElementById('stepSummary').innerHTML = `
+    <div class="step step-done">Step 1: ${Math.round(data.step1_time)}s</div>
+    <div class="step step-done">Step 2a: ${data.n_sheets} sheets, ${data.n_tables} tables (${Math.round(data.step2a_time)}s)</div>
+    <div class="step step-done">Step 2d: ${data.n_drawing_items} items (${Math.round(data.step2d_time)}s)</div>
+    <div class="step step-done">Step 3: ${Math.round(data.step3_time)}s</div>
+    <div class="step step-done" style="background:#1a3a1a;font-weight:700">Total: ${total}s</div>
+  `;
 
-    // Metrics
-    const items = data.items || [];
-    const nQty = items.filter(i => i.qty !== null).length;
-    document.getElementById('mTotal').textContent = items.length;
-    document.getElementById('mQty').textContent = nQty;
-    document.getElementById('mReview').textContent = items.length - nQty;
+  currentItems = (data.items || []).map((it, idx) => ({ ...it, _idx: idx }));
+  renderEditableTable();
+}
 
-    // Table
-    const tbody = document.getElementById('tableBody');
-    tbody.innerHTML = items.map(i => {
-      const conf = i.confidence || 0;
-      const confClass = conf >= 0.8 ? 'confidence-high' : conf >= 0.5 ? 'confidence-med' : 'confidence-low';
-      return `<tr>
-        <td>${esc(i.trade)}</td>
-        <td>${esc(i.description)}</td>
-        <td>${i.qty !== null ? i.qty : ''}</td>
-        <td>${esc(i.unit)}</td>
-        <td>${esc(i.mark)}</td>
-        <td style="font-size:0.75rem;color:#999">${esc(i.source || '')}</td>
-        <td class="${confClass}">${conf ? Math.round(conf * 100) + '%' : ''}</td>
-      </tr>`;
-    }).join('');
-  } catch (e) {
-    // No results yet
+function renderEditableTable() {
+  const items = currentItems;
+  document.getElementById('mTotal').textContent = items.length;
+  document.getElementById('mQty').textContent = items.filter(i => i.qty !== null && i.qty !== '').length;
+  document.getElementById('mReview').textContent = items.filter(i => i.qty === null || i.qty === '').length;
+
+  document.getElementById('tableBody').innerHTML = items.map((i, idx) => {
+    const review = i.review || '';
+    const hasReview = review.length > 0;
+    const rowStyle = hasReview ? ' style="background:#2a1a1a"' : '';
+    return `<tr${rowStyle}>
+      <td>${esc(i.trade)}</td>
+      <td class="editable editable-desc"><input value="${escAttr(i.description)}" onchange="updateItem(${idx},'description',this.value)"></td>
+      <td class="editable"><input type="number" value="${i.qty !== null && i.qty !== '' ? i.qty : ''}" style="width:60px" onchange="updateItem(${idx},'qty',this.value)" ${hasReview ? 'placeholder="TBD"' : ''}></td>
+      <td class="editable"><input value="${escAttr(i.unit)}" style="width:50px" onchange="updateItem(${idx},'unit',this.value)"></td>
+      <td>${esc(i.mark)}</td>
+      <td style="font-size:0.75rem;color:#8bb4e0">${esc(i.method||'')}</td>
+      <td style="font-size:0.75rem;color:#999">${esc(i.source||'')}</td>
+      <td style="font-size:0.75rem;color:${hasReview ? '#ff8888' : '#666'}">${hasReview ? esc(review) : ''}</td>
+      <td class="row-actions"><button onclick="deleteRow(${idx})" title="Delete">✕</button></td>
+    </tr>`;
+  }).join('');
+}
+
+function updateItem(idx, field, value) {
+  if (field === 'qty') {
+    currentItems[idx].qty = value === '' ? null : parseFloat(value);
+  } else {
+    currentItems[idx][field] = value;
+  }
+  // Update metrics without full re-render
+  document.getElementById('mQty').textContent = currentItems.filter(i => i.qty !== null && i.qty !== '').length;
+  document.getElementById('mReview').textContent = currentItems.filter(i => i.qty === null || i.qty === '').length;
+}
+
+function deleteRow(idx) {
+  currentItems.splice(idx, 1);
+  renderEditableTable();
+}
+
+function addRow() {
+  currentItems.push({
+    trade: '', description: '', qty: null, unit: 'EA',
+    mark: '', method: 'manual', source: '', confidence: 0,
+  });
+  renderEditableTable();
+  // Scroll to bottom and focus the new description input
+  const tbody = document.getElementById('tableBody');
+  const lastRow = tbody.lastElementChild;
+  if (lastRow) {
+    lastRow.scrollIntoView({ behavior: 'smooth' });
+    const descInput = lastRow.querySelector('td.editable-desc input');
+    if (descInput) descInput.focus();
   }
 }
 
-async function resetPipeline() {
-  await fetch('/reset', { method: 'POST' });
-  hide('error');
-  hide('results');
-  hide('progress');
+let pricingPollTimer = null;
+
+async function submitPricing() {
+  const btn = document.getElementById('pricingBtn');
+  const status = document.getElementById('pricingStatus');
+  btn.disabled = true;
+  status.textContent = `Sending ${currentItems.length} items to pricing agent...`;
+
+  try {
+    const resp = await fetch('/submit-pricing', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items: currentItems }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json();
+      throw new Error(err.error || 'Pricing failed');
+    }
+    // Start polling for pricing status
+    pricingPollTimer = setInterval(pollPricingStatus, 3000);
+    pollPricingStatus();
+  } catch (e) {
+    status.textContent = 'Pricing failed: ' + e.message;
+    btn.disabled = false;
+  }
+}
+
+async function pollPricingStatus() {
+  const status = document.getElementById('pricingStatus');
+  const btn = document.getElementById('pricingBtn');
+  try {
+    const resp = await fetch('/pricing-status');
+    const s = await resp.json();
+
+    if (s.status === 'running') {
+      status.textContent = `Pricing ${s.total_items} items... ${s.elapsed}s elapsed`;
+    } else if (s.status === 'complete') {
+      clearInterval(pricingPollTimer); pricingPollTimer = null;
+      pricedData = s.result;
+      status.textContent = '';
+      showPricedResults();
+    } else if (s.status === 'error') {
+      clearInterval(pricingPollTimer); pricingPollTimer = null;
+      status.textContent = 'Pricing failed: ' + s.error;
+      btn.disabled = false;
+    }
+  } catch (e) {}
+}
+
+function showPricedResults() {
+  hide('results'); hide('upload'); hide('error'); hide('progress');
+  show('pricing');
+
+  const items = pricedData.items || [];
+  const summary = pricedData.summary || {};
+
+  document.getElementById('pTotal').textContent = summary.total_items || items.length;
+  document.getElementById('pPriced').textContent = summary.found_on_web || 0;
+  document.getElementById('pNotFound').textContent = summary.not_found || 0;
+
+  document.getElementById('pricingSummary').innerHTML = `
+    <div class="step step-done" style="font-weight:700">Pricing Complete</div>
+  `;
+
+  document.getElementById('pricingBody').innerHTML = items.map((p, idx) => {
+    const orig = currentItems[idx] || {};
+    const qty = p.qty || orig.qty || 0;
+    const matUnit = p.material_unit_cost || 0;
+    const laborUnit = p.labor_unit_cost || 0;
+    const matTotal = p.material_total != null ? p.material_total : (qty * matUnit);
+    const laborTotal = p.labor_total != null ? p.labor_total : (qty * laborUnit);
+    const manHrs = p.man_hours || 0;
+    const rate = p.man_hour_rate || 0;
+    const total = p.line_total != null ? p.line_total : (matTotal + laborTotal);
+
+    const fmt = (v) => v ? '$' + Number(v).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '$0.00';
+
+    return `<tr>
+      <td>${esc(p.trade || orig.trade)}</td>
+      <td>${esc(p.description || orig.description)}</td>
+      <td>${qty || ''}</td>
+      <td>${esc(p.unit || orig.unit)}</td>
+      <td class="price-col">${fmt(matUnit)}</td>
+      <td class="price-col">${fmt(matTotal)}</td>
+      <td class="price-col">${fmt(laborUnit)}</td>
+      <td class="price-col">${fmt(laborTotal)}</td>
+      <td>${manHrs || ''}</td>
+      <td>${rate ? fmt(rate) : ''}</td>
+      <td class="price-col" style="font-weight:700">${fmt(total)}</td>
+      <td style="font-size:0.75rem;color:#999">${esc(p.notes || '')}</td>
+    </tr>`;
+  }).join('');
+}
+
+function exportCSV() {
+  if (!pricedData) return;
+  const items = pricedData.items || [];
+  const headers = ['Trade','Description','Qty','Unit','Mat/Unit','Mat Total','Labor/Unit','Labor Total','Man HRs','Rate','Total','Notes'];
+  let csv = headers.join(',') + '\n';
+  items.forEach((p, idx) => {
+    const orig = currentItems[idx] || {};
+    const qty = p.qty || orig.qty || 0;
+    const matUnit = p.material_unit_cost || 0;
+    const laborUnit = p.labor_unit_cost || 0;
+    const matTotal = p.material_total != null ? p.material_total : (qty * matUnit);
+    const laborTotal = p.labor_total != null ? p.labor_total : (qty * laborUnit);
+    const manHrs = p.man_hours || 0;
+    const rate = p.man_hour_rate || 0;
+    const total = p.line_total != null ? p.line_total : (matTotal + laborTotal);
+    csv += [
+      csvEsc(p.trade || orig.trade), csvEsc(p.description || orig.description),
+      qty, csvEsc(p.unit || orig.unit),
+      matUnit, matTotal.toFixed(2), laborUnit, laborTotal.toFixed(2),
+      manHrs, rate, total.toFixed(2), csvEsc(p.notes || '')
+    ].join(',') + '\n';
+  });
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'priced_bom.csv';
+  a.click();
+}
+
+function csvEsc(s) {
+  s = String(s || '');
+  if (s.includes(',') || s.includes('"') || s.includes('\n')) return '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
+
+async function forceReset() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  await fetch('/force-reset', { method: 'POST' });
+  hide('error'); hide('results'); hide('progress'); hide('pricing');
   show('upload');
-  runBtn.disabled = selectedFiles.length === 0;
+  selectedFiles = [];
+  currentItems = [];
+  pricedData = null;
+  currentJobId = null;
+  window.location.hash = '';
+  fileInput.value = '';
+  fileList.textContent = '';
+  uploadStatus.textContent = '';
+  runBtn.disabled = true;
 }
 
 function show(id) { document.getElementById(id).style.display = 'block'; }
 function hide(id) { document.getElementById(id).style.display = 'none'; }
 function esc(s) { const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
+function escAttr(s) { return (s || '').replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
 
-// On page load, check if there are results or a running pipeline
-pollStatus();
+async function loadJobHistory() {
+  try {
+    const resp = await fetch('/jobs');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const jobs = data.jobs || [];
+    if (jobs.length === 0) {
+      document.getElementById('jobHistory').innerHTML = '';
+      return;
+    }
+    let html = '<div class="job-history"><h3>Previous Jobs</h3>';
+    for (const j of jobs) {
+      const statusClass = 'job-status-' + j.status;
+      const files = (j.filenames || []).join(', ') || 'Unknown files';
+      const items = j.n_items ? j.n_items + ' items' : '';
+      const created = j.created ? new Date(j.created).toLocaleDateString() : '';
+      html += '<div class="job-card" onclick="loadJob(\'' + j.job_id + '\')">' +
+        '<div>' +
+          '<div class="job-info">' + esc(files) + '</div>' +
+          '<div class="job-files">' + j.job_id + (created ? ' — ' + created : '') + (items ? ' — ' + items : '') + '</div>' +
+        '</div>' +
+        '<div class="job-status ' + statusClass + '">' + j.status + '</div>' +
+      '</div>';
+    }
+    html += '</div>';
+    document.getElementById('jobHistory').innerHTML = html;
+  } catch (e) {}
+}
+
+async function loadJob(jobId) {
+  currentJobId = jobId;
+  window.location.hash = 'job=' + jobId;
+  const resp = await fetch('/status/' + jobId);
+  if (!resp.ok) { alert('Job not found'); return; }
+  const job = await resp.json();
+  if (job.status === 'complete') {
+    loadResults();
+  } else if (job.status === 'running' || job.status === 'queued') {
+    show('progress');
+    hide('upload'); hide('results'); hide('error'); hide('pricing');
+    startPolling();
+  } else if (job.status === 'error') {
+    hide('progress'); hide('upload'); hide('results'); hide('pricing');
+    show('error');
+    document.getElementById('errorMsg').textContent = job.error;
+    document.getElementById('errorTrace').textContent = job.traceback || '';
+  }
+}
+
+// On page load: check URL for job_id, otherwise show upload + history
+(function init() {
+  // Check URL hash for a job ID (e.g., #job=abc123)
+  const hash = window.location.hash;
+  const jobMatch = hash.match(/job=(\w+)/);
+  if (jobMatch) {
+    currentJobId = jobMatch[1];
+    startPolling();
+  } else {
+    // Fresh page — show upload form + job history, don't attach to any running job
+    hide('progress'); hide('error'); hide('results'); hide('pricing');
+    show('upload');
+  }
+  loadJobHistory();
+})();
 </script>
-
 </body>
 </html>

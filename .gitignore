@@ -3,3 +3,8 @@ __pycache__/
 *.pyc
 .DS_Store
 *.pkl
+*.pdf
+*_results*.json
+test_*.json
+pricing_payload.json
+DOCUMENTATION.txt

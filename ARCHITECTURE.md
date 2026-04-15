@@ -1,253 +1,423 @@
-# QTO Pipeline — Architecture Reference
+# Takeoffs Agent — Complete Architecture
 
 ## Overview
 
-AI-powered **Quantity Takeoff (QTO) Pipeline** that extracts scope items from construction bid documents (drawings + specifications) using Google Gemini APIs.
+AI-powered Quantity Takeoff pipeline that extracts scope items from construction bid documents (drawings, specifications, or both), produces an editable Bill of Materials (BOM), and sends it to a pricing agent for material + labor cost estimation.
 
-**Stack:** Streamlit UI, Python 3.11, Gemini 2.5 Pro/Flash, PyMuPDF, img2table + Tesseract OCR, Pydantic
+**Stack:** Python/FastAPI backend, plain HTML/JS frontend, Google Gemini API (Flash + Pro), deployed on Cloud Run.
+
+**URL:** https://takeoffs-670952019485.us-central1.run.app
 
 ---
 
-## Project Structure
+## Infrastructure
 
 ```
-Takeoffs/
-├── streamlit_app.py                     # Main UI + background pipeline runner
-├── Dockerfile                           # Cloud Run deployment
-├── requirements.txt                     # Python deps
-├── packages.txt                         # System deps (tesseract)
-└── app/
-    ├── config/
-    │   ├── settings.py                  # Pydantic BaseSettings (API keys, feature flags)
-    │   └── trades.py                    # 23 CSI MasterFormat trades
-    ├── core/
-    │   ├── document_classification.py   # Data models: PageInfo, ClassifiedFile, DocumentClassificationResult
-    │   └── estimate_models.py           # Data models: SheetInfo, ExtractedTable, EstimateItem
-    ├── utils/
-    │   └── genai_client.py              # get_genai_client() helper
-    ├── agents/
-    │   └── document_classifier_agent.py # Step 1: Classify + render drawing pages
-    └── extractors/
-        ├── sheet_indexer.py             # Step 2a: Parse sheet index from title page
-        ├── table_extractor.py           # Step 2a: Detect & extract schedules (img2table + Gemini Flash)
-        ├── drawing_reader.py            # Step 2d: Full drawing extraction (Gemini Pro + Files API)
-        └── vision_quantifier.py         # Step 3: Count/measure items on plan pages (Gemini Pro vision)
+Cloud Run:
+  Memory: 16GB RAM
+  CPU: 8 vCPU, gen2 execution environment, CPU boost enabled
+  Timeout: 25 minutes
+  Instances: min 1, max 3, session affinity
+
+GCS Bucket: takeoffs-uploads-670952019485
+  /{session_id}/          — uploaded files (temp, cleaned after pipeline)
+  /results/{job_id}.json  — persistent job results (survive deploys)
+
+Gemini API: Google API Key auth
+Pricing Agent: https://cost-rag-pricing-670952019485.us-central1.run.app/price
 ```
 
 ---
 
-## 4-Step Pipeline
+## Job Queue System
 
 ```
-[Upload PDFs]
-    │
-    ▼
-┌─────────────────────────────────────────────────────────┐
-│  STEP 1: Document Classification                        │
-│  document_classifier_agent.py                           │
-│                                                         │
-│  1. Ingest files (extract text only, no image rendering)│
-│  2. Upload raw PDFs to Gemini File Search → classify    │
-│     into 8 categories + identify drawing page numbers   │
-│  3. Fallback chain: File Search/Files API → Vision       │
-│  4. Render images ONLY for drawing pages (200 DPI)      │
-│                                                         │
-│  Output: DocumentClassificationResult                   │
-│    - files[].pages[].has_drawings, extracted_text        │
-│    - files[].pages[].image_bytes (drawings only)        │
-│    - raw_pdf_bytes (for downstream uploads)             │
-└─────────────────────────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────────────────────────┐
-│  STEP 2a: Sheet Index + Table Extraction                │
-│  sheet_indexer.py + table_extractor.py                  │
-│                                                         │
-│  Sheet Indexer:                                         │
-│  1. Filter to DRAWINGS + SPECS files only               │
-│  2. Send title page image to Gemini Flash → parse       │
-│     sheet index (sheet_id, title, discipline)           │
-│  3. Match pages to index entries (text search + order)  │
-│  4. Build SheetInfo per drawing page                    │
-│                                                         │
-│  Table Extractor:                                       │
-│  1. Render pages at 100 DPI → img2table detects tables  │
-│  2. Crop tables at 200 DPI → send to Gemini Flash       │
-│  3. LLM returns structured JSON (headers + rows)        │
-│  4. Convert to ExtractedTable → ExtractedScheduleRow    │
-│                                                         │
-│  Output: List[SheetInfo], List[ExtractedTable]          │
-└─────────────────────────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────────────────────────┐
-│  STEP 2d: Drawing Reader                                │
-│  drawing_reader.py                                      │
-│                                                         │
-│  1. Upload full PDFs to Gemini Files API                │
-│  2. Build context: page index + pre-extracted schedules │
-│  3. Send to Gemini Pro with 4-pass extraction prompt:   │
-│     Pass 1: Schedule-based items (link to plans)        │
-│     Pass 2: Plan-driven items (symbols, keynotes)       │
-│     Pass 3: General notes/details (text-stated scope)   │
-│     Pass 4: Cross-reference (link schedules ↔ plans)    │
-│  4. Parse response → EstimateItem objects               │
-│     - qty may be null if needs_counting/measurement     │
-│                                                         │
-│  Output: List[EstimateItem]                             │
-└─────────────────────────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────────────────────────┐
-│  STEP 3: Vision Quantifier                              │
-│  vision_quantifier.py                                   │
-│                                                         │
-│  For items with needs_counting or needs_measurement:    │
-│  1. Group items by (trade, page)                        │
-│  2. Render plan pages at 300 DPI                        │
-│  3. Send trade-focused prompt + page image to Gemini    │
-│     Pro vision (up to 5 concurrent calls)               │
-│  4. Model counts symbols / reads dimensions             │
-│  5. Merge qty results back into EstimateItem list       │
-│                                                         │
-│  Output: List[EstimateItem] (qty filled where possible) │
-└─────────────────────────────────────────────────────────┘
-    │
-    ▼
-[Results: DataFrame with Trade, Description, Qty, Unit, Mark, Confidence]
+3 concurrent pipelines max. 4th+ uploads queue automatically.
+Each upload → unique job_id → own state, own results, own URL.
+Results persist in GCS across deploys.
+
+Endpoints:
+  POST /get-upload-urls        → GCS signed URLs for browser direct upload
+  POST /start/{session_id}     → creates job, starts immediately or queues
+  GET  /status/{job_id}        → poll specific job progress
+  GET  /results/{job_id}       → get specific job results (bookmarkable)
+  GET  /jobs                   → list all jobs (active + GCS history)
+  POST /submit-pricing         → send items to pricing agent (background)
+  GET  /pricing-status         → poll pricing progress
+  POST /force-reset            → cancel current state
+
+Frontend isolation:
+  Each browser window tracks its OWN job via URL hash (#job=abc123)
+  New window → upload form + job history (doesn't attach to others' jobs)
+  Job history panel shows all previous jobs, click to view results
 ```
 
 ---
 
-## Key Data Models
+## Pipeline Flow
 
-### PageInfo (per page)
 ```
-page_number (0-based in file), global_page_number, extracted_text,
-has_drawings (bool), image_bytes (JPEG, only if drawing), categories
-```
-
-### ClassifiedFile (per uploaded file)
-```
-filename, categories (Set of 8 types), pages (List[PageInfo]),
-has_visual_content, visual_pages, text_pages
-```
-
-### DocumentClassificationResult (Step 1 output)
-```
-files (List[ClassifiedFile]), raw_pdf_bytes (Dict[filename → bytes])
-Query helpers: get_files_by_category(), get_pages_by_category(), summary()
-```
-
-### SheetInfo (per drawing sheet)
-```
-sheet_id ("A9.00"), title, discipline ("Architectural"),
-global_page_number, source_file, extracted_text, image_bytes,
-tables (List[ExtractedTable])
-```
-
-### ExtractedTable (per schedule found)
-```
-page_number, sheet_id, schedule_type ("door"|"window"|"finish"|...),
-headers (List[str]), rows (List[Dict]), confidence
-```
-
-### EstimateItem (final output — one per scope item)
-```
-trade, item_description, qty (nullable), unit ("EA"|"LF"|"SF"|...),
-extraction_method, confidence, source_page, sheet_id,
-material_spec, schedule_mark,
-needs_counting (bool), needs_measurement (bool),
-counting_target, counting_source_pages
+Upload → Step 1 (Classify & Render)
+       → Route based on file types:
+           Case 1: Specs only    → Specs Extraction → Results
+           Case 2: Specs + Dwgs  → Drawings flow (Case 3) [merge TBD]
+           Case 3: Drawings only → Step 2 → Step 3 → Results
+       → Human Review (edit qty/description)
+       → Pricing Agent
+       → Priced BOM + CSV Export
 ```
 
 ---
 
-## 8 Document Categories
-1. `cover_sheet` — title page, TOC
-2. `instructions_to_bidder` — bidding procedures
-3. `project_specifications` — CSI Divisions 01-49
-4. `construction_drawings` — actual drawing sheets
-5. `general_conditions` — AIA A201
-6. `special_conditions` — project-specific amendments
-7. `bid_form` — proposal forms, pricing sheets
-8. `bid_security` — bid bond forms
+## Step 1: Classify & Render
+
+**File:** `app/agents/document_classifier_agent.py`
+**Model:** Gemini 2.5 Pro
+**Purpose:** Determine file types, render drawing pages at 300 DPI
+
+```
+Input: List[(filename, bytes)] — PDFs, CSV, XLSX, DOCX uploaded by user
+  Non-PDF files parsed immediately:
+    CSV → pandas → ExtractedTable
+    XLSX → pandas per sheet → ExtractedTable
+    DOCX → python-docx tables → ExtractedTable
+
+For each PDF, classify FILE TYPE:
+  - File < 20MB → Gemini File Search (FileSearchStore + tool)
+  - File > 20MB → Gemini Files API (direct upload)
+  - Files API fails (400) → vision fallback (20 samples at 100 DPI)
+  - File > 1000 pages → split 3 chunks, classify each in parallel
+
+Categories detected:
+  construction_drawings, project_specifications, cover_sheet,
+  general_conditions, special_conditions, instructions_to_bidder,
+  bid_form, bid_security
+
+Flag drawing pages:
+  - Pure drawings file (ONLY construction_drawings, no specs mixed in)
+    → ALL pages flagged as drawings
+  - Mixed file (both construction_drawings AND project_specifications)
+    → ONLY model-identified drawing pages flagged (per-page detection)
+  - Specs-only file → no drawing pages
+
+Render ALL flagged drawing pages at 300 DPI:
+  PyMuPDF → JPEG quality 85
+  8 parallel threads (PyMuPDF releases GIL)
+  ~8s/page on Cloud Run
+  Images stored on PageInfo.image_bytes
+  Reused by Steps 2 and 3 — no re-rendering
+
+Output: DocumentClassificationResult
+  .files[].pages[].image_bytes  (300 DPI JPEG, drawings only)
+  .files[].pages[].has_drawings (True/False)
+  .files[].pages[].extracted_text (PyMuPDF text)
+  .raw_pdf_bytes {filename: bytes}
+
+Then DETECT what exists:
+  has_drawings = any file classified as construction_drawings
+  has_specs = any file classified as project_specifications
+  → Routes to Case 1, 2, or 3
+```
 
 ---
 
-## 23 CSI Trades
-General Requirements, Site Work, Masonry, Concrete, Metals,
-Rough Carpentry, Finish Carpentry, Plumbing, Electrical,
-HVAC and Sheet Metals, Insulation, Doors and Windows, Drywall,
-Cabinets, Stucco and Siding, Painting, Roofing,
-Tile & Solid Surfaces, Bath and Accessories, Appliances,
-Flooring, Fire Sprinklers, Landscaping
+## Case 1: Specs Only (no drawings)
+
+**File:** `app/extractors/specs_extractor.py`
+**Model:** Gemini 2.5 Pro (thinking=32768)
+**Purpose:** Full quantity takeoff from specifications alone
+
+```
+Input: DocumentClassificationResult (specs files only)
+
+Upload specs PDF to Gemini Files API
+  If > 45MB → split with PyMuPDF + garbage=4
+
+Single Pro call with detailed estimator prompt that teaches:
+
+  QUANTITY EXTRACTION RULES:
+  1. EXPLICIT: "Paint walls (approx 35,000 sf)" → qty: 35000, unit: SF
+  2. COUNT LOCATIONS: "casework in A300 and B300" → qty: 2, unit: EA
+  3. COUNT LISTS: "Rooms A100, A101, A102, B100, B101, B102" → qty: 6
+  4. DERIVE FROM CONTEXT: "sinks in classrooms A300 and B300" → qty: 2
+  5. PER-ITEM BREAKDOWN: demo + new work = separate line items
+  6. AREA CALCULATIONS: rooms × avg size = total SF
+  7. LS ONLY for genuinely unquantifiable items (bonds, permits, cleanup)
+  8. ALTERNATES as separate items with prefix
+  9. NULL only when truly unknowable (needs drawings, "as required")
+  10. METHOD field explains HOW quantity was derived
+
+Extracts from ALL document sections:
+  - Scope summaries / bid forms (most explicit quantities)
+  - CSI spec sections (material specs, products)
+  - Demolition sections (separate from new work)
+  - Environmental/abatement reports (areas from surveys)
+  - General requirements (permits, bonds, temp facilities)
+  - Addenda (scope changes)
+
+Output: List[EstimateItem] → goes directly to Results
+  Each item: trade, description, qty, unit, spec_section,
+  source, method (explains qty derivation), material_spec, review
+
+Skips Steps 2-3 entirely.
+```
 
 ---
 
-## External API Calls
+## Case 2: Specs + Drawings (both exist)
 
-| Step | Model | API | Purpose |
-|------|-------|-----|---------|
-| 1 | gemini-2.5-pro | File Search | Classify documents (upload PDF → classify) |
-| 1 (fallback) | gemini-2.5-pro | Vision | Classify via sampled page images |
-| 2a | gemini-2.5-flash | Vision | Parse sheet index from title page |
-| 2a | gemini-2.5-flash | Vision | Extract table data from crops |
-| 2d | gemini-2.5-pro | Files API | Read full drawings (upload PDF → extract scope) |
-| 3 | gemini-2.5-pro | Vision | Count/measure items on plan page images |
+**Current behavior:** Treats as Case 3 (drawings only). Specs ignored for now.
 
-**Tesseract OCR**: Used by img2table for table bounding box detection (Step 2a)
+**Future:** Will extract from specs first, then merge spec context into drawing
+discipline packages for enriched Step 3 plan reading. Code exists in
+`specs_extractor.py` (extract_from_specs_with_drawings + merge_specs_into_packages)
+but is not yet wired into the pipeline.
 
 ---
 
-## DPI Settings
-| Context | DPI | Purpose |
-|---------|-----|---------|
-| Drawing page images (Step 1) | 200 | Stored in PageInfo.image_bytes |
-| Table detection (Step 2a) | 100 | img2table bbox detection (low memory) |
-| Table crops (Step 2a) | 200 | Sent to Gemini Flash |
-| Vision quantification (Step 3) | 300 | Sent to Gemini Pro (high quality for counting) |
+## Case 3: Drawings Only — also used for Case 2
+
+### Step 2: Context Extraction
+
+**File:** `app/extractors/context_extractor.py`
+**Model:** Gemini 2.5 Flash
+**Purpose:** Extract ALL text-based content so Step 3 doesn't re-read any text
+
+```
+Part A — Sheet Index + Discipline Mapping (1 Flash call on title page):
+
+  Flash reads the sheet index table and extracts per sheet:
+    sheet_id, title, discipline, AND page number
+
+  Flash groups disciplines correctly from the actual title page:
+    Architectural (includes AD- demolition sheets)
+    Civil, Structural
+    Plumbing (includes PD- demolition)
+    Mechanical (includes V- ventilation + VD- demo)
+    Electrical (includes ED- demolition)
+    Fire Protection, Abatement (ASB- + LBP-), Landscape
+
+  Page numbers assigned by Flash from sheet index order.
+  Disciplines from Flash, not prefix guessing in code.
+  Code groups: discipline_pages = {discipline: [page_numbers]}
+
+Part B — Per-Discipline Extraction (parallel Flash calls):
+  10 workers, retry on 503/SSL with 15s/30s backoff
+
+  For each discipline group:
+    Send all pages (300 DPI images from Step 1)
+    Flash returns MARKDOWN (not JSON — avoids 3'-0" escaping issues):
+
+      # CONTEXT
+      Renovation of Building 1A. Existing items marked (E)/(P)...
+
+      # PAGE INFO
+      - Page 14 (A102): Floor Plan, Toilet Plan [has_plans] [has_schedules]
+
+      # SYMBOLS
+      - WC-1: Wall-mounted water closet [fixture]
+
+      # KEYNOTES
+      - 1 (page 7): REMOVE EXISTING DOOR AND FRAME
+
+      # SCHEDULE: DOOR SCHEDULE (door) [page 14]
+      | DOOR NO. | WIDTH | HEIGHT | MATERIAL |
+      |----------|-------|--------|----------|
+      | 101 | 3'-0" | 7'-0" | HM |
+
+  Markdown parsed in Python:
+    _parse_markdown_response() → splits on # section headers
+    _parse_markdown_table() → splits on | pipes
+    No JSON escaping issues with construction values
+
+Output:
+  sheets: List[SheetInfo]
+  tables: List[ExtractedTable]
+  packages: Dict[discipline, DisciplinePackage]
+    .schedules — tables with headers + full row data
+    .keynotes — [{key, text, page}]
+    .symbols — [{symbol, description, category}]
+    .page_info — [{page, sheet_id, plans, has_schedules, has_plans}]
+    .context — discipline scope summary
+```
+
+### Step 3: Plan Reading & Quantification
+
+**File:** `app/extractors/trade_extractor.py`
+**Model:** Gemini 2.5 Pro (thinking_budget=32768)
+**Purpose:** Read plans visually — count symbols, read dimensions, validate quantities
+
+```
+Input: classification, sheets, tables, packages (from Step 2)
+
+Context-only disciplines skipped:
+  Title/Index, Cover, General, Unknown → page refs only, not extracted
+
+For each active discipline (10 workers, retry 503/SSL):
+
+  Receives from Step 2 (text, NOT re-read from images):
+    - Schedules with full row data
+    - Keynotes with text
+    - Symbol definitions from legends
+    - Page info with plan names
+    - Context summary
+
+  Pro receives 300 DPI page images + focused prompt:
+
+  SCHEDULE ITEMS:
+    qty = number of matching rows in schedule
+    method: "from_schedule: Door Schedule, 27 rows"
+    source: "schedule:MARK"
+
+  COUNT SYMBOLS (EA items):
+    Quadrant method: NW, NE, SW, SE → total
+    method: "counted: WC-1 on P-112, NW:2 NE:1 SW:2 SE:1 = 6"
+    source: "plan_count:SHEET_ID"
+
+  READ DIMENSIONS (SF/LF items):
+    Read dimension strings, show math
+    method: "measured: Room 101 = 15'-0" × 12'-6" = 187.5 SF"
+    If unreadable → qty=null, review="Manual takeoff — measure from: A-107"
+    source: "plan_measurement:SHEET_ID"
+
+  KEYNOTE ITEMS:
+    method: "from_keynote: K-5 on sheet P-112"
+    source: "keynote:SHEET_ID"
+
+  DEMOLITION:
+    Count items to remove on demo plans
+    source: "plan_count:SHEET_ID"
+
+  Rules:
+    (E)/(P) = existing → skip
+    FBO = "(FBO — Install Only)"
+
+Output: List[EstimateItem]
+  trade, description, qty, unit, mark, source, method,
+  confidence (0.85/0.65/0.45), review, material_spec
+```
 
 ---
 
-## Streamlit UI Architecture
+## All Cases Converge: Results & Human Review
 
-- **Background thread** runs the pipeline (Streamlit reruns can't interrupt it)
-- **threading.Lock** prevents duplicate concurrent runs
-- **Module-level `_pipeline_state` dict** survives Streamlit reruns
-- **3-second polling** (`time.sleep(3) + st.rerun()`) updates progress
-- Button disabled while running, Reset button on error
+```
+Serialization:
+  Each EstimateItem → {trade, description, qty, unit, mark,
+    confidence, source, method, review}
+  Saved to: _jobs[job_id]["items"] (memory) + GCS (persistent)
+
+Frontend (static/index.html):
+  Editable table:
+    Description (editable), Qty (editable), Unit (editable)
+    Mark, Method, Source, Confidence, Review (read-only)
+  Manual takeoff items highlighted red with source page reference
+  Add/remove rows
+  Job history panel — click any previous job to view
+  URL hash: #job=abc123 (bookmarkable, shareable)
+  "Submit for Pricing" button
+```
 
 ---
 
-## Deployment
+## Pricing
 
-### Google Cloud Run (primary)
+```
+Background thread sends to pricing agent:
+  POST https://cost-rag-pricing-670952019485.us-central1.run.app/price
+
+  Payload per item:
+    {trade, description, qty (default 1), unit, mark, source}
+
+  Response per item:
+    material_unit_cost, labor_unit_cost,
+    material_total, labor_total,
+    man_hours, man_hour_rate, line_total,
+    price_source, citations[], notes
+
+  Frontend displays:
+    Mat/Unit | Mat Total | Labor/Unit | Labor Total |
+    Man HRs | Rate | Total | Notes
+
+  Export CSV
+```
+
+---
+
+## Files
+
+| File | Step | Purpose |
+|------|------|---------|
+| `main.py` | — | Job queue (3 concurrent), case routing, endpoints, pricing |
+| `app/agents/document_classifier_agent.py` | 1 | File classification + 300 DPI rendering |
+| `app/extractors/specs_extractor.py` | 1.5 | Specs extraction (Case 1 + future Case 2) |
+| `app/extractors/context_extractor.py` | 2 | Sheet index + schedules + keynotes + symbols (markdown) |
+| `app/extractors/trade_extractor.py` | 3 | Per-discipline plan reading & quantification |
+| `app/core/estimate_models.py` | — | Data models (EstimateItem, SheetInfo, ExtractedTable) |
+| `app/core/document_classification.py` | — | Classification models (PageInfo, ClassifiedFile) |
+| `static/index.html` | — | Frontend (upload, progress, edit, job history, pricing, CSV) |
+
+---
+
+## Models & API Calls
+
+| Step | Model | Thinking | Calls | Purpose |
+|------|-------|----------|-------|---------|
+| 1 Classification | Gemini 2.5 Pro | default | 1/file | File type detection |
+| 1 Vision fallback | Gemini 2.5 Pro | default | 1/file (if needed) | Fallback for large files |
+| 1.5 Specs (Case 1) | Gemini 2.5 Pro | 32768 | 1/specs file | Full takeoff from specs |
+| 2A Sheet index | Gemini 2.5 Flash | no | 1 (title page) | Sheet index + discipline + page mapping |
+| 2B Context | Gemini 2.5 Flash | no | 1/discipline | Schedules, keynotes, symbols (markdown) |
+| 3 Plan reading | Gemini 2.5 Pro | 32768 | 1/discipline | Counting, measuring, quantification |
+| Pricing | External API | — | 1 total | Material + labor cost lookup |
+
+---
+
+## Disciplines (from Flash, not hardcoded)
+
+Extracted by Flash from the actual sheet index on the title page.
+Demo sheets grouped under parent discipline.
+
+| Discipline | Sheet Prefixes | Includes |
+|------------|---------------|----------|
+| Architectural | A-, AD- | Plans, schedules, demo, finishes, doors |
+| Civil | C- | Site plans, utilities, grading |
+| Structural | S- | Foundation, framing, details |
+| Plumbing | P-, PD- | Piping, fixtures, demo |
+| Mechanical | V-, VD-, M- | Ventilation, ductwork, equipment, demo |
+| Electrical | E-, ED- | Power, lighting, controls, demo |
+| Fire Protection | FP- | Sprinkler plans |
+| Abatement | ASB-, LBP- | Asbestos, lead paint |
+| Landscape | L- | Landscape plans |
+
+---
+
+## Key Design Decisions
+
+| Decision | Reasoning |
+|----------|-----------|
+| 3 cases based on file types | Specs-only bids are real. Combined files need per-page detection |
+| Specs prompt teaches estimator thinking | Count rooms, derive from context, split demo/new, explain method |
+| Mixed file → per-page detection | "File = drawings → all pages" fails for combined bid packets |
+| Markdown output in Step 2 | Construction values (3'-0", 1-3/4") break JSON escaping |
+| Discipline from Flash | Sheet index has the mapping. No prefix guessing in code |
+| Step 2 = text, Step 3 = vision | Flash cheap for OCR. Pro expensive — don't waste on schedules |
+| 3 concurrent + queue | Multiple estimators share the app simultaneously |
+| Results in GCS | Persist across deploys, bookmarkable per job |
+| 300 DPI once in Step 1 | Single render pass. Steps 2 and 3 reuse same images |
+| Retry on 503/SSL | Gemini demand spikes. 15s/30s backoff prevents lost disciplines |
+| Per-browser job isolation | URL hash prevents window A seeing window B's running job |
+
+---
+
+## Deploy
+
 ```bash
 gcloud run deploy takeoffs \
-  --source . \
-  --region us-central1 \
-  --memory 8Gi --cpu 4 \
-  --timeout 1500 \
-  --allow-unauthenticated \
-  --set-env-vars "GOOGLE_API_KEY=...,OPENAI_API_KEY=..."
+  --source . --region us-central1 \
+  --memory 16Gi --cpu 8 --timeout 1500 \
+  --allow-unauthenticated --min-instances 1 --max-instances 3 \
+  --session-affinity --cpu-boost --execution-environment gen2 \
+  --set-env-vars "GOOGLE_API_KEY=...,OPENAI_API_KEY=..." \
+  --project gen-lang-client-0144509263
 ```
-
-### Streamlit Cloud (fallback)
-- `packages.txt` for Tesseract
-- `st.secrets` for API keys
-- Limited to 1GB RAM (may OOM on large documents)
-
----
-
-## Error Handling & Fallbacks
-
-| Component | Failure | Fallback |
-|-----------|---------|----------|
-| Gemini File Search | Upload/indexing fails | Vision classification (sampled pages) |
-| Vision classification | API error | Keyword heuristics on filename + text |
-| Sheet index parsing | No index found | Detect sheet IDs from page text |
-| Table extraction | img2table/Tesseract fails | Continue without tables for that page |
-| Drawing reader | Gemini API error | Retry up to 3x with exponential backoff |
-| Vision quantifier | Timeout (200s) | Retry once, then leave qty as null |
-| Vision quantifier | Low confidence | Leave qty as null (manual review) |

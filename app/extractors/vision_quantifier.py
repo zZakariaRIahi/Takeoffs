@@ -421,13 +421,22 @@ def quantify_items(
         logger.warning("No raw PDF bytes found for drawing files")
         return items
 
-    # ── 5. Pre-render pages (each page rendered once, shared across trades)
-    logger.info("  Rendering pages...")
+    # ── 5. Pre-render pages in parallel (each page rendered once, shared across trades)
+    logger.info(f"  Rendering {len(unique_pages)} pages in parallel...")
     t0 = time.time()
     page_images: Dict[int, bytes] = {}
-    for pg in unique_pages:
-        page_images[pg] = _render_page_jpeg(pdf_bytes, pg)
-        logger.info(f"    Page {pg}: {len(page_images[pg]) / 1024:.0f} KB")
+
+    def _render(pg):
+        img = _render_page_jpeg(pdf_bytes, pg)
+        return pg, img
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(_render, pg): pg for pg in unique_pages}
+        for future in as_completed(futures):
+            pg, img = future.result()
+            page_images[pg] = img
+            logger.info(f"    Page {pg}: {len(img) / 1024:.0f} KB")
+
     logger.info(f"  Rendered {len(page_images)} pages [{time.time() - t0:.1f}s]")
 
     # ── 6. Process (trade, page) batches in parallel ──────────────────────
@@ -466,35 +475,27 @@ def quantify_items(
     for item_idx, page_results in item_results.items():
         item = items[item_idx]
 
-        # Filter out low-confidence results but keep non-low ones
-        good_results = [r for r in page_results if r["confidence"] != "low"]
-
-        if not good_results:
-            # ALL pages returned low — keep for manual review
-            kept_null += 1
-            item.review_reason = "Vision confidence too low — manual takeoff needed"
-            continue
-
-        # Sum qty across pages (multi-page items)
+        # Use ALL results including low-confidence — estimator will validate
         total_qty = 0.0
         all_methods = []
         worst_confidence = "high"
 
-        for r in good_results:
+        for r in page_results:
             if r["qty"] is not None:
                 total_qty += float(r["qty"])
                 all_methods.append(r["method"])
-                if r["confidence"] == "medium" and worst_confidence == "high":
+                if r["confidence"] == "low":
+                    worst_confidence = "low"
+                elif r["confidence"] == "medium" and worst_confidence == "high":
                     worst_confidence = "medium"
-            else:
-                # A non-low page returned null qty — skip this result
-                continue
 
         if total_qty > 0:
             item.qty = total_qty
             item.confidence = confidence_map.get(worst_confidence, 0.65)
             item.extraction_method = "vision_count" if item.needs_counting else "vision_measurement"
             item.notes = " | ".join(all_methods) if all_methods else item.notes
+            if worst_confidence == "low":
+                item.review_reason = "Low confidence — estimator should verify"
             # Update source with the sheet where vision counted/measured
             if item.counting_source_pages:
                 pg = item.counting_source_pages[0]

@@ -16,12 +16,14 @@ from typing import Any, Dict, List, Optional
 @dataclass
 class ExtractedTable:
     """One table found on a drawing page via PyMuPDF find_tables()."""
-    page_number: int                    # global page number
-    sheet_id: str
+    page_number: int = 0                # global page number
+    sheet_id: str = ""
     schedule_type: str = ""             # "door"|"window"|"finish"|"fixture"|"equipment"|"panel"|"lighting"|"hardware"|"unknown"
     headers: List[str] = field(default_factory=list)
     rows: List[Dict[str, str]] = field(default_factory=list)  # {header: cell_value}
     confidence: float = 0.0             # parse quality: cell fill rate, header detection
+    table_title: str = ""               # e.g., "DOOR SCHEDULE"
+    filter_type: str = "detected"       # "detected" | "uploaded_file"
 
 
 @dataclass

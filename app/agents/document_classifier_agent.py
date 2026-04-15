@@ -1,13 +1,13 @@
-"""Step 1 — Document Ingestion + Classification.
+"""Step 1 - Document Ingestion + Classification.
 
 Pipeline:
-  1. ingest_files()                — extract ZIPs, read PDFs (PyMuPDF), render page images
-  2. classify_file_with_gemini()   — upload PDF to Gemini File Search store,
+  1. ingest_files()                - extract ZIPs, read PDFs (PyMuPDF), render page images
+  2. classify_file_with_gemini()   - upload PDF to Gemini File Search store,
                                      ask gemini-2.5-pro to classify into 8 categories.
-                                     Gemini handles chunking/indexing internally — no token limits.
-     2b. _classify_with_vision()   — fallback if File Search / Files API fails:
+                                     Gemini handles chunking/indexing internally - no token limits.
+     2b. _classify_with_vision()   - fallback if File Search / Files API fails:
                                      sends sampled page images to Gemini vision instead.
-  3. Post-classification           — set has_drawings flag per page based on model's
+  3. Post-classification           - set has_drawings flag per page based on model's
                                      drawing page identification (not all pages in file)
   4. Return DocumentClassificationResult ready for Steps 2-4
 """
@@ -42,14 +42,11 @@ logger = logging.getLogger(__name__)
 # CONSTANTS
 # ════════════════════════════════════════════════════════════════════════════════
 
-DRAWING_DPI = 200       # render DPI for all pages (used by vision in Step 3c)
+DRAWING_DPI = 300       # render DPI - single render pass used by Steps 2 and 3
 
-MAX_PAGES_FOR_SINGLE_UPLOAD = 300  # above this → split PDF into 3 chunks
-NUM_CHUNKS = 3                     # number of equal PDF chunks for large files
-
-MAX_VISION_PAGES = 20   # max pages to sample for vision fallback classification
-MAX_FILE_SEARCH_BYTES = 20 * 1024 * 1024  # 20 MB — skip File Search for larger files
-MAX_CLASSIFY_WORKERS = 4  # max concurrent classification calls to avoid rate limits
+MAX_CHUNK_BYTES = 40 * 1024 * 1024  # 40 MB per chunk - Files API limit is 50 MB
+MAX_VISION_PAGES = 20               # max pages to sample for vision fallback
+MAX_CLASSIFY_WORKERS = 4            # max concurrent classification calls
 
 CLASSIFICATION_PROMPT = """You are a construction bid document classifier.
 
@@ -59,14 +56,14 @@ Analyze the uploaded document and provide TWO things:
 
 ═══ CATEGORIES (assign one or more) ═══
 
-1. cover_sheet — project title page, table of contents, summary
-2. instructions_to_bidder — bidding procedures, submission requirements
-3. project_specifications — technical specs (CSI Divisions 01-49), materials, methods
-4. construction_drawings — the document contains actual construction drawing sheets
-5. general_conditions — AIA A201, standard contract conditions
-6. special_conditions — project-specific amendments to general conditions
-7. bid_form — proposal forms, bid schedules, pricing sheets
-8. bid_security — bid bond forms, surety requirements
+1. cover_sheet - project title page, table of contents, summary
+2. instructions_to_bidder - bidding procedures, submission requirements
+3. project_specifications - technical specs (CSI Divisions 01-49), materials, methods
+4. construction_drawings - the document contains actual construction drawing sheets
+5. general_conditions - AIA A201, standard contract conditions
+6. special_conditions - project-specific amendments to general conditions
+7. bid_form - proposal forms, bid schedules, pricing sheets
+8. bid_security - bid bond forms, surety requirements
 
 ═══ DRAWING PAGE IDENTIFICATION ═══
 
@@ -74,10 +71,10 @@ Construction drawing sheets are pages with:
 - Sheet numbers in title blocks (A1.0, S-100, M-001, E-101, P-500, L1.0, etc.)
 - Primarily graphical content: plans, elevations, sections, details, schedules on drawing sheets
 - Standard drawing title blocks along the bottom or right edge
-- Minimal body text (just callouts, notes, legends — NOT paragraphs of specifications)
+- Minimal body text (just callouts, notes, legends - NOT paragraphs of specifications)
 
 NOT drawing sheets: text-heavy spec pages, bid forms, conditions, general requirements,
-tables of contents — even if they contain small embedded figures or diagrams.
+tables of contents - even if they contain small embedded figures or diagrams.
 
 ═══ RULES ═══
 
@@ -103,7 +100,7 @@ Return ONLY a JSON object (no markdown fences, no extra text):
 def ingest_files(
     file_contents: List[Tuple[str, bytes]],
 ) -> List[ClassifiedFile]:
-    """Read uploaded files → extract text + render images per page.
+    """Read uploaded files -> extract text + render images per page.
 
     Handles: PDFs (via PyMuPDF), ZIPs (extract then recurse), images, text files.
     Files are ingested in parallel (PyMuPDF releases the GIL during rendering).
@@ -166,64 +163,67 @@ def ingest_files(
 
 
 # ════════════════════════════════════════════════════════════════════════════════
-# 2. GEMINI FILE SEARCH CLASSIFICATION (8 categories)
+# 2. FILES API CLASSIFICATION (8 categories)
 # ════════════════════════════════════════════════════════════════════════════════
 
 def classify_file_with_gemini(
     cf: ClassifiedFile,
     file_bytes: bytes,
 ) -> Tuple[Set[DocumentCategory], List[int]]:
-    """Classify a file using Gemini File Search.
+    """Classify a file using Gemini Files API.
 
-    Returns (categories, drawing_page_numbers) where drawing_page_numbers
-    is a list of 1-based page numbers within this file that are drawing sheets.
+    * <= 40 MB  -> single Files API upload + classify
+    * > 40 MB  -> split into ~40 MB chunks, classify each in parallel, merge results
 
-    • ≤ 300 pages → single upload to File Search store
-    • > 300 pages → split PDF into 3 equal chunks, classify each, union results
+    Falls back to vision (sampled page images) if Files API fails.
     """
+    import math
+
     total = len(cf.pages)
     file_size = len(file_bytes)
     is_pdf = cf.filename.lower().endswith(".pdf")
-
     drawing_pages: List[int] = []
+    cats: Set[DocumentCategory] = set()
 
-    # Large files → skip File Search, use Files API
-    if file_size > MAX_FILE_SEARCH_BYTES:
+    if not is_pdf or file_size <= MAX_CHUNK_BYTES:
         logger.info(
             f"Classifying {cf.filename} ({total} pages, {file_size/1024/1024:.1f} MB) "
-            f"with Files API (too large for File Search)"
+            f"via Files API"
         )
         cats, drawing_pages = _classify_single_pdf_with_files_api(
             file_bytes, cf.filename, total_pages=total
         )
-    # Image-heavy PDFs (drawings) → use Files API (File Search hangs on these)
-    elif is_pdf and _is_image_heavy_pdf(cf):
-        cats, drawing_pages = _classify_single_pdf_with_files_api(
-            file_bytes, cf.filename, total_pages=total
+    else:
+        num_chunks = math.ceil(file_size / MAX_CHUNK_BYTES)
+        logger.info(
+            f"Classifying {cf.filename} ({total} pages, {file_size/1024/1024:.1f} MB) "
+            f"via Files API in {num_chunks} chunks"
         )
-    elif is_pdf and total > MAX_PAGES_FOR_SINGLE_UPLOAD:
-        logger.info(f"Classifying {cf.filename} ({total} pages) with Gemini File Search…")
-        # Split PDF into 3 equal sub-PDFs, classify each chunk separately
-        chunk_size = total // NUM_CHUNKS
-        remainder = total % NUM_CHUNKS
-        chunk_pdfs = _split_pdf(file_bytes, NUM_CHUNKS)
-        logger.info(f"  Split into {len(chunk_pdfs)} chunks for classification")
+        chunk_pdfs = _split_pdf(file_bytes, num_chunks)
+        chunk_size = total // num_chunks
+        remainder = total % num_chunks
+        chunk_page_sizes = [chunk_size + (1 if i < remainder else 0) for i in range(num_chunks)]
+        chunk_labels = [f"{cf.filename} [chunk {i+1}/{num_chunks}]" for i in range(num_chunks)]
 
-        cats: Set[DocumentCategory] = set()
+        chunk_results: List[Optional[Tuple[Set[DocumentCategory], List[int]]]] = [None] * num_chunks
+        with ThreadPoolExecutor(max_workers=num_chunks) as executor:
+            futures = {
+                executor.submit(
+                    _classify_single_pdf_with_files_api,
+                    chunk_bytes, chunk_labels[i], total_pages=chunk_page_sizes[i]
+                ): i
+                for i, chunk_bytes in enumerate(chunk_pdfs)
+            }
+            for future in as_completed(futures):
+                idx = futures[future]
+                chunk_results[idx] = future.result()
+
         page_start = 0
-        for i, chunk_bytes in enumerate(chunk_pdfs):
-            chunk_pages = chunk_size + (1 if i < remainder else 0)
-            label = f"{cf.filename} [chunk {i+1}/{len(chunk_pdfs)}]"
-            chunk_cats, chunk_drawing = _classify_single_pdf_with_gemini(
-                chunk_bytes, label, total_pages=chunk_pages
-            )
+        for i, (chunk_cats, chunk_drawing) in enumerate(chunk_results):
+            chunk_pages = chunk_page_sizes[i]
             cats |= chunk_cats
-
-            # Offset chunk-relative drawing pages to file-level page numbers
             for dp in chunk_drawing:
                 drawing_pages.append(page_start + dp)
-
-            # Tag each page in this chunk with its categories
             page_end = page_start + chunk_pages
             for p in cf.pages[page_start:page_end]:
                 p.categories = chunk_cats
@@ -233,11 +233,6 @@ def classify_file_with_gemini(
                 f"{len(chunk_drawing)} drawing pages"
             )
             page_start = page_end
-    else:
-        logger.info(f"Classifying {cf.filename} ({total} pages) with Gemini File Search…")
-        cats, drawing_pages = _classify_single_pdf_with_gemini(
-            file_bytes, cf.filename, total_pages=total
-        )
 
     if not cats:
         cats, drawing_pages = _classify_with_vision(cf, cf.filename, raw_pdf_bytes=file_bytes)
@@ -245,7 +240,7 @@ def classify_file_with_gemini(
     cf.categories = cats
     drawing_pages = sorted(set(drawing_pages))
     logger.info(
-        f"  → {cf.filename}: {sorted(c.value for c in cats)}, "
+        f"  -> {cf.filename}: {sorted(c.value for c in cats)}, "
         f"{len(drawing_pages)} drawing pages"
     )
     return cats, drawing_pages
@@ -262,7 +257,6 @@ def _split_pdf(pdf_bytes: bytes, num_chunks: int) -> List[bytes]:
     start = 0
     for i in range(num_chunks):
         end = start + chunk_size + (1 if i < remainder else 0)
-        # Create sub-PDF
         sub_doc = fitz.open()
         sub_doc.insert_pdf(doc, from_page=start, to_page=end - 1)
         chunks.append(sub_doc.tobytes())
@@ -274,96 +268,15 @@ def _split_pdf(pdf_bytes: bytes, num_chunks: int) -> List[bytes]:
     return chunks
 
 
-def _classify_single_pdf_with_gemini(
-    file_bytes: bytes,
-    label: str,
-    total_pages: int = 0,
-) -> Tuple[Set[DocumentCategory], List[int]]:
-    """Upload a single PDF to Gemini File Search, classify, clean up.
-
-    Returns (categories, drawing_page_numbers) where drawing_page_numbers
-    is a list of 1-based page numbers identified as construction drawings.
-
-    1. Create File Search store
-    2. Upload PDF → Gemini indexes internally
-    3. generate_content with file_search tool
-    4. Parse categories + drawing pages
-    5. Delete store
-    """
-    client = get_genai_client()
-    model = settings.CLASSIFICATION_MODEL
-    store_name = None
-
-    try:
-        # 1. Create store
-        store = client.file_search_stores.create(
-            config={"display_name": f"classify-{label[:50]}"}
-        )
-        store_name = store.name
-
-        # 2. Upload to store
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-            tmp.write(file_bytes)
-            tmp_path = tmp.name
-
-        operation = client.file_search_stores.upload_to_file_search_store(
-            file=tmp_path,
-            file_search_store_name=store_name,
-            config={"display_name": label},
-        )
-
-        logger.info(f"  Uploading & indexing {label}…")
-        while not operation.done:
-            time.sleep(3)
-            operation = client.operations.get(operation)
-        logger.info(f"  Indexing complete for {label}")
-
-        Path(tmp_path).unlink(missing_ok=True)
-
-        # 3. Classify
-        response = client.models.generate_content(
-            model=model,
-            contents=f"Classify this document ({total_pages} pages): {label}\n\n{CLASSIFICATION_PROMPT}",
-            config=types.GenerateContentConfig(
-                tools=[
-                    types.Tool(
-                        file_search=types.FileSearch(
-                            file_search_store_names=[store_name]
-                        )
-                    )
-                ],
-                temperature=0,
-            ),
-        )
-
-        raw = response.text or "{}"
-        logger.info(f"  Gemini raw response for {label}: {raw[:300]}")
-
-        return _parse_classification_response(raw, total_pages)
-
-    except Exception as e:
-        logger.error(f"Gemini classification failed for {label}: {e}")
-        return set(), []
-    finally:
-        if store_name:
-            try:
-                client.file_search_stores.delete(name=store_name, config={"force": True})
-            except Exception as e:
-                logger.warning(f"  Failed to delete store {store_name}: {e}")
-
-
 def _classify_single_pdf_with_files_api(
     file_bytes: bytes,
     label: str,
     total_pages: int = 0,
 ) -> Tuple[Set[DocumentCategory], List[int]]:
-    """Upload PDF via Files API and classify with generateContent.
+    """Upload a PDF chunk via Files API and classify with generateContent.
 
-    Unlike File Search (which hangs on image-heavy PDFs), the Files API
-    reliably processes any PDF. The model sees the full document content
-    including images, diagrams, and drawings.
-
-    Limit: 50 MB per PDF (Files API cap).
+    Handles files up to 40 MB (well within the 50 MB Files API limit).
+    Reliable for all PDF types - drawings, specs, mixed content.
     """
     client = get_genai_client()
     model = settings.CLASSIFICATION_MODEL
@@ -389,7 +302,7 @@ def _classify_single_pdf_with_files_api(
 
         logger.info(f"  Files API upload ACTIVE for {label}")
 
-        # Classify — pass the uploaded file directly to generateContent
+        # Classify - pass the uploaded file directly to generateContent
         response = client.models.generate_content(
             model=model,
             contents=[
@@ -425,27 +338,6 @@ def _classify_single_pdf_with_files_api(
             pass
 
 
-def _is_image_heavy_pdf(cf: ClassifiedFile) -> bool:
-    """Check if a PDF is mostly images (low text density).
-
-    Image-heavy PDFs (like construction drawings) cause File Search
-    to hang indefinitely. These should use Files API instead.
-    """
-    if not cf.pages:
-        return False
-    total_text = sum(len(p.extracted_text.strip()) for p in cf.pages)
-    avg_chars_per_page = total_text / len(cf.pages)
-    # Text-heavy PDFs (specs) typically have 1000+ chars/page
-    # Drawing PDFs typically have < 200 chars/page
-    is_heavy = avg_chars_per_page < 300
-    if is_heavy:
-        logger.info(
-            f"  {cf.filename}: image-heavy PDF ({avg_chars_per_page:.0f} chars/page avg) "
-            f"→ using Files API instead of File Search"
-        )
-    return is_heavy
-
-
 def _classify_with_vision(
     cf: ClassifiedFile,
     label: str,
@@ -453,7 +345,7 @@ def _classify_with_vision(
 ) -> Tuple[Set[DocumentCategory], List[int]]:
     """Fallback: classify by sending sampled page images to Gemini vision.
 
-    Used when File Search upload fails (e.g., large files hitting 503/400).
+    Used when Files API upload fails.
     Samples up to MAX_VISION_PAGES evenly across the document.
     Renders images on-the-fly for sampled pages if not already rendered.
     Returns (categories, drawing_page_numbers).
@@ -465,7 +357,9 @@ def _classify_with_vision(
         total = len(cf.pages)
         n_sample = min(total, MAX_VISION_PAGES)
         sample_indices = [int(i * total / n_sample) for i in range(n_sample)]
-        zoom = DRAWING_DPI / 72
+        # Render at low DPI just for classification (not extraction)
+        classify_dpi = 100
+        zoom = classify_dpi / 72
         doc = fitz.open(stream=raw_pdf_bytes, filetype="pdf")
         for idx in sample_indices:
             if idx < len(doc) and idx < len(cf.pages):
@@ -507,24 +401,32 @@ def _classify_with_vision(
             types.Part.from_bytes(data=p.image_bytes, mime_type="image/jpeg")
         )
 
-    try:
-        response = client.models.generate_content(
-            model=model,
-            contents=contents,
-            config=types.GenerateContentConfig(temperature=0),
-        )
-        raw = response.text or "{}"
-        logger.info(f"  Vision fallback response for {label}: {raw[:300]}")
-        return _parse_classification_response(raw, total)
-    except Exception as e:
-        logger.error(f"  Vision fallback failed for {label}: {e}")
-        return set(), []
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=types.GenerateContentConfig(temperature=0),
+            )
+            raw = response.text or "{}"
+            logger.info(f"  Vision fallback response for {label}: {raw[:300]}")
+            return _parse_classification_response(raw, len(cf.pages))
+        except Exception as e:
+            err_str = str(e)
+            if attempt < 2 and ("503" in err_str or "SSL" in err_str or "UNAVAILABLE" in err_str or "timed out" in err_str):
+                wait = 15 * (attempt + 1)
+                logger.warning(f"  Vision fallback attempt {attempt+1} failed for {label} ({err_str[:80]}), retrying in {wait}s...")
+                import time; time.sleep(wait)
+            else:
+                logger.error(f"  Vision fallback failed for {label}: {e}")
+                return set(), []
+    return set(), []
 
 
 def classify_documents(
     file_contents: List[Tuple[str, bytes]],
 ) -> DocumentClassificationResult:
-    """Full Step 1 entry point: ingest → Gemini classify → set page flags."""
+    """Full Step 1 entry point: ingest -> Gemini classify -> set page flags."""
     # Keep raw bytes for uploading to Gemini
     raw_bytes_map = {name: data for name, data in file_contents}
 
@@ -550,16 +452,25 @@ def classify_documents(
                 logger.error(f"  Classification failed for {cf.filename}: {e}")
                 file_results[cf.filename] = (set(), [])
 
-    # Apply drawing flags using model-identified page numbers
+    # Apply drawing flags
     for cf in files:
         cats, drawing_pages = file_results.get(cf.filename, (set(), []))
+        is_drawings = DocumentCategory.CONSTRUCTION_DRAWINGS in (cats or set())
+        is_also_specs = DocumentCategory.PROJECT_SPECIFICATIONS in (cats or set())
 
-        if drawing_pages:
-            # Convert 1-based drawing page numbers to a set for fast lookup
+        if is_drawings and not is_also_specs and not drawing_pages:
+            # Pure drawings file with no specific page list - flag ALL pages
+            for p in cf.pages:
+                p.has_drawings = True
+            cf.has_visual_content = True
+            logger.info(
+                f"  {cf.filename}: {len(cf.pages)}/{len(cf.pages)} pages flagged as drawings (entire drawings file)"
+            )
+        elif drawing_pages:
+            # Partial - use model-identified page numbers
             drawing_set = set(drawing_pages)
             flagged = 0
             for p in cf.pages:
-                # p.page_number is 0-based within file, drawing_pages are 1-based
                 if (p.page_number + 1) in drawing_set:
                     p.has_drawings = True
                     flagged += 1
@@ -611,16 +522,37 @@ def _process_pdf(
     return pages, global_offset + len(pages)
 
 
+def _render_page_worker(args):
+    """Render a single page - used by multiprocessing Pool.
+    Returns (page_number, jpeg_bytes) to avoid sharing PageInfo across processes.
+    """
+    pdf_bytes, page_number, dpi = args
+    try:
+        zoom = dpi / 72
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        if page_number < len(doc):
+            pix = doc[page_number].get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+            img_bytes = pix.tobytes("jpeg", 85)
+            doc.close()
+            return page_number, img_bytes
+        doc.close()
+    except Exception as e:
+        logger.error(f"  Render failed for page {page_number}: {e}")
+    return page_number, None
+
+
 def render_drawing_images(
     files: List[ClassifiedFile],
     raw_pdf_bytes: dict,
 ) -> None:
     """Render images ONLY for pages flagged as drawings (in-place).
 
-    Called after classification so we skip the 230 spec pages entirely.
-    Uses parallel threads for speed (PyMuPDF releases GIL during rendering).
+    Uses multiprocessing for true CPU parallelism (bypasses GIL).
+    Each worker renders one page independently.
     """
-    zoom = DRAWING_DPI / 72
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor
+
     for cf in files:
         if not cf.filename.lower().endswith(".pdf"):
             continue
@@ -632,20 +564,38 @@ def render_drawing_images(
         if not drawing_pages:
             continue
 
-        logger.info(f"Rendering {len(drawing_pages)} drawing page images for {cf.filename} (parallel)")
+        n_workers = min(len(drawing_pages), multiprocessing.cpu_count() or 4)
+        logger.info(
+            f"Rendering {len(drawing_pages)} drawing pages for {cf.filename} "
+            f"at {DRAWING_DPI} DPI ({n_workers} workers)"
+        )
+
+        # Build page lookup for applying results
+        page_by_num = {p.page_number: p for p in drawing_pages}
+
+        # Use ThreadPoolExecutor (PyMuPDF releases GIL during C-level rendering)
+        # ProcessPoolExecutor would require serializing large pdf_bytes per worker
+        import time
+        t0 = time.time()
 
         def _render_one(page_info):
-            # Each thread opens its own doc (PyMuPDF is not thread-safe)
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
             if page_info.page_number < len(doc):
+                zoom = DRAWING_DPI / 72
                 pix = doc[page_info.page_number].get_pixmap(matrix=fitz.Matrix(zoom, zoom))
                 page_info.image_bytes = pix.tobytes("jpeg", 85)
             doc.close()
 
-        with ThreadPoolExecutor(max_workers=8) as executor:
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
             executor.map(_render_one, drawing_pages)
 
-        logger.info(f"  Rendered {len(drawing_pages)} pages")
+        elapsed = time.time() - t0
+        rendered = sum(1 for p in drawing_pages if p.image_bytes)
+        total_mb = sum(len(p.image_bytes) for p in drawing_pages if p.image_bytes) / 1024 / 1024
+        logger.info(
+            f"  Rendered {rendered} pages in {elapsed:.1f}s "
+            f"({total_mb:.0f} MB total, {elapsed/max(rendered,1):.1f}s/page)"
+        )
 
 
 def _parse_classification_response(

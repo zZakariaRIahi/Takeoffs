@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 MODEL = "gemini-2.5-pro"
 MAX_RETRIES = 3
+MAX_PDF_BYTES = 45 * 1024 * 1024  # 45 MB — stay safely under Gemini's 50 MB processing limit
 
 # ════════════════════════════════════════════════════════════════════════════════
 # Client
@@ -300,8 +301,10 @@ RULES
 ═══════════════════════════════════════════════════════════════════
 1. ONE ITEM PER UNIQUE TYPE — combine all instances into one item with correct qty.
 2. TRUST the pre-extracted schedule data for schedule-sourced items.
-3. For countable items on plans → needs_counting=true, qty=null. DO NOT guess counts.
-4. For area/length items → needs_measurement=true, qty=null. DO NOT compute areas.
+3. For countable items on plans → needs_counting=true, BUT STILL provide your best qty
+   estimate (count what you can see). The estimator will validate. Never leave qty=null.
+4. For area/length items → needs_measurement=true, BUT STILL provide your best qty
+   estimate from dimensions shown on drawings. Read text dimensions. Never leave qty=null.
 5. For items with explicit QTY in schedule → extract the number, confidence="high".
 6. Include schedule_mark for schedule items, empty string for non-schedule items.
 7. source_pages = ALL relevant pages for this item.
@@ -323,6 +326,38 @@ RULES
 16. BE THOROUGH. An experienced estimator reviewing your output should not find
     major scope gaps. Think about what a contractor would need to BUILD this project.
 
+═══════════════════════════════════════════════════════════════════
+QUANTITY RULES — CRITICAL FOR ACCURACY
+═══════════════════════════════════════════════════════════════════
+Q1. SCHEDULE QUANTITIES ARE AUTHORITATIVE — If a door schedule lists 27 doors,
+    qty=27. If a fixture schedule lists 4 water closets, qty=4. COUNT THE ROWS
+    in the pre-extracted schedule data and use that as qty. Do NOT recount from plans
+    when the schedule already tells you exactly how many there are.
+
+Q2. COUNTABLE ITEMS (EA) — For items like receptacles, light fixtures, sensors:
+    COUNT every symbol you see on the plan pages. Provide your best count.
+    If you count 33 duplex receptacles across all floor plans, qty=33.
+    Never use qty=1 as a placeholder — actually count.
+
+Q3. AREA/LENGTH ITEMS — For items like flooring SF, wall LF, ductwork:
+    READ DIMENSIONS from the drawings. If a room is 20'-0" x 15'-0", the floor area
+    is 300 SF. If a wall is 45'-0" long at 10'-0" high, drywall = 450 SF.
+    Use room dimensions, overall building dimensions, and drawing scales.
+
+Q4. COMPLEX MEASUREMENT ITEMS — For items that CANNOT be accurately measured from
+    plan views (ductwork LBS, piping LF, conduit runs, insulation), set
+    needs_measurement=true and provide a ROUGH estimate with low confidence.
+    Flag these with measurement_note="Requires detailed takeoff from plans".
+
+Q5. LS (LUMP SUM) ITEMS — For items like "Final Cleaning", "Temporary Protection",
+    "Asbestos Abatement": qty=1, unit=LS. These are priced as lump sums.
+    Do NOT try to convert to SF or LF.
+
+Q6. DEMOLITION QUANTITIES — Count EACH item being demolished:
+    - "Remove 27 doors" → qty=27, unit=EA (count the demo symbols on demo plans)
+    - "Remove ceiling" → read the room dimensions for SF
+    - "Remove flooring" → read room dimensions for SF
+
 17. CONSTRUCTION ABBREVIATIONS — understand these standard markings:
     (P) = existing / previously installed — DO NOT include as new BOM item
     (E) = existing — DO NOT include as new BOM item
@@ -335,9 +370,12 @@ RULES
     If an existing item is being RELOCATED or RECONNECTED, include it with
     description prefixed "Relocate:" and source_type="keynote".
 
-18. The PRE-EXTRACTED SCHEDULES below are REFERENCE only — always verify against
-    the actual PDF. If the PDF shows different data than the pre-extracted schedules,
-    trust the PDF. Read schedule abbreviations exactly (HM, SC, RB, OHD, etc.).
+18. The PRE-EXTRACTED SCHEDULES below were already extracted from the drawings
+    using high-resolution OCR. TRUST this data — it has been verified. Do NOT
+    re-extract or duplicate schedule items. Instead, USE the pre-extracted data
+    to cross-reference with plans (e.g., match door marks on plans to schedule rows).
+    Only override if you clearly see a discrepancy in the PDF.
+    Read schedule abbreviations exactly (HM, SC, RB, OHD, etc.).
 
 19. SCAN ELEVATIONS AND DETAILS for building envelope items (roofing, siding, gutters,
     trim, soffit, flashing, metal panels). These are high-value items that ONLY appear
@@ -612,97 +650,175 @@ def read_drawings(
 
     client = _get_genai_client()
 
-    # Upload all drawing PDFs
-    uploaded_files = []
-    try:
-        for filename, pdf_bytes in pdf_entries:
-            uploaded = _upload_pdf(client, pdf_bytes, filename)
-            uploaded_files.append(uploaded)
+    # Build prompt context (shared across all chunks)
+    page_index = _build_page_index(sheets)
+    schedule_context = _build_schedule_context(tables)
 
-        # Build prompt context
-        page_index = _build_page_index(sheets)
-        schedule_context = _build_schedule_context(tables)
+    base_prompt = (
+        f"{DRAWING_PROMPT}\n\n"
+        f"{page_index}\n\n"
+        f"{schedule_context}"
+    )
 
-        prompt_text = (
-            f"{DRAWING_PROMPT}\n\n"
-            f"{page_index}\n\n"
-            f"{schedule_context}"
-        )
-
-        # Build contents: prompt + all uploaded file refs
-        contents: list = [prompt_text]
-        for uf in uploaded_files:
-            contents.append(uf)
-
-        # Call Gemini Pro
-        t0 = time.time()
-        for attempt in range(MAX_RETRIES):
-            try:
+    # Split large PDFs into chunks under the 45 MB limit
+    pdf_chunks = []  # list of (label, bytes, page_start, page_end)
+    for filename, pdf_bytes in pdf_entries:
+        if len(pdf_bytes) > MAX_PDF_BYTES:
+            import fitz
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            total = len(doc)
+            num_chunks = (len(pdf_bytes) // MAX_PDF_BYTES) + 1
+            chunk_size = total // num_chunks
+            remainder = total % num_chunks
+            start = 0
+            for ci in range(num_chunks):
+                end = start + chunk_size + (1 if ci < remainder else 0)
+                sub_doc = fitz.open()
+                sub_doc.insert_pdf(doc, from_page=start, to_page=end - 1)
+                chunk_bytes = sub_doc.tobytes(garbage=4, deflate=True)
+                sub_doc.close()
+                label = f"{filename} [part {ci+1}/{num_chunks}]"
+                pdf_chunks.append((label, chunk_bytes, start, end))
                 logger.info(
-                    f"  Sending to {MODEL} "
-                    f"({len(uploaded_files)} file(s), {len(sheets)} sheets)"
-                    f"{' retry ' + str(attempt + 1) if attempt > 0 else ''}"
+                    f"  Split {filename}: part {ci+1}/{num_chunks} "
+                    f"pages {start+1}–{end} ({len(chunk_bytes)/1024/1024:.1f} MB)"
+                )
+                start = end
+            doc.close()
+        else:
+            import fitz
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            total = len(doc)
+            doc.close()
+            pdf_chunks.append((filename, pdf_bytes, 0, total))
+
+    # Process each chunk sequentially (chunk 2 gets chunk 1's results as context)
+    all_items: List[EstimateItem] = []
+
+    for chunk_idx, (label, chunk_bytes, page_start, page_end) in enumerate(pdf_chunks):
+        uploaded = None
+        try:
+            uploaded = _upload_pdf(client, chunk_bytes, label)
+
+            # Build prompt for this chunk
+            if chunk_idx == 0 and len(pdf_chunks) == 1:
+                # Single chunk — use base prompt as-is
+                prompt_text = base_prompt
+            elif chunk_idx == 0:
+                # First chunk of a multi-chunk split
+                prompt_text = (
+                    f"{base_prompt}\n\n"
+                    f"NOTE: This PDF has been split due to size. "
+                    f"You are analyzing pages {page_start+1}–{page_end} now. "
+                    f"Remaining pages will be analyzed separately after this. "
+                    f"Extract ALL items you can see in these pages."
+                )
+            else:
+                # Subsequent chunks — include previous results as context
+                prev_items_json = json.dumps([
+                    {
+                        "trade": i.trade,
+                        "description": i.item_description,
+                        "qty": i.qty,
+                        "unit": i.unit,
+                        "source": i.source or "",
+                        "method": i.extraction_method or "",
+                        "schedule_mark": i.schedule_mark or "",
+                        "source_pages": i.counting_source_pages or [],
+                    }
+                    for i in all_items
+                ], indent=2)
+
+                prompt_text = (
+                    f"{base_prompt}\n\n"
+                    f"IMPORTANT — SPLIT ANALYSIS PART {chunk_idx+1}/{len(pdf_chunks)}:\n"
+                    f"You are analyzing pages {page_start+1}–{page_end}.\n"
+                    f"Pages 1–{page_start} were already analyzed and produced the items below.\n\n"
+                    f"Your job:\n"
+                    f"1. Extract ONLY NEW items visible in THIS chunk's pages ({page_start+1}–{page_end})\n"
+                    f"2. Do NOT re-extract items already listed below\n"
+                    f"3. If you see an item that looks similar to one below but is on a DIFFERENT page "
+                    f"or has DIFFERENT specifications, it IS a new item — INCLUDE it\n"
+                    f"4. When in doubt, INCLUDE the item. The human reviewer will handle duplicates.\n"
+                    f"5. Do NOT drop any items. Missing an item is worse than a duplicate.\n\n"
+                    f"=== {len(all_items)} ITEMS ALREADY EXTRACTED FROM PAGES 1–{page_start} ===\n"
+                    f"{prev_items_json}"
                 )
 
-                response = client.models.generate_content(
-                    model=MODEL,
-                    contents=contents,
-                    config=genai_types.GenerateContentConfig(
-                        temperature=0,
-                        max_output_tokens=65536,
-                        thinking_config=genai_types.ThinkingConfig(
-                            thinking_budget=32768,
+            contents: list = [prompt_text, uploaded]
+
+            # Call Gemini Pro
+            t0 = time.time()
+            for attempt in range(MAX_RETRIES):
+                try:
+                    logger.info(
+                        f"  Sending chunk {chunk_idx+1}/{len(pdf_chunks)} to {MODEL} "
+                        f"(pages {page_start+1}–{page_end})"
+                        f"{' retry ' + str(attempt + 1) if attempt > 0 else ''}"
+                    )
+
+                    response = client.models.generate_content(
+                        model=MODEL,
+                        contents=contents,
+                        config=genai_types.GenerateContentConfig(
+                            temperature=0,
+                            max_output_tokens=65536,
+                            thinking_config=genai_types.ThinkingConfig(
+                                thinking_budget=32768,
+                            ),
                         ),
-                    ),
-                )
+                    )
 
-                # Extract text (skip thinking parts)
-                raw_text = ""
-                if response.candidates:
-                    for part in response.candidates[0].content.parts:
-                        if part.text and (not hasattr(part, "thought") or not part.thought):
-                            raw_text += part.text
+                    # Extract text (skip thinking parts)
+                    raw_text = ""
+                    if response.candidates:
+                        for part in response.candidates[0].content.parts:
+                            if part.text and (not hasattr(part, "thought") or not part.thought):
+                                raw_text += part.text
 
-                if not raw_text:
-                    raw_text = response.text or "{}"
+                    if not raw_text:
+                        raw_text = response.text or "{}"
 
-                dur = time.time() - t0
-                logger.info(f"  Response received [{dur:.1f}s], {len(raw_text)} chars")
+                    dur = time.time() - t0
+                    logger.info(f"  Chunk {chunk_idx+1} response [{dur:.1f}s], {len(raw_text)} chars")
 
-                parsed = _parse_response(raw_text)
-                items = _dicts_to_estimate_items(parsed)
+                    parsed = _parse_response(raw_text)
+                    chunk_items = _dicts_to_estimate_items(parsed)
 
-                # Log page classification if available
-                page_class = parsed.get("page_classification", {})
-                if page_class:
-                    logger.info(f"  Page classifications: {len(page_class)} pages")
+                    n_counting = sum(1 for i in chunk_items if i.needs_counting)
+                    n_measurement = sum(1 for i in chunk_items if i.needs_measurement)
+                    n_qty = sum(1 for i in chunk_items if i.qty is not None)
+                    logger.info(
+                        f"  Chunk {chunk_idx+1}: {len(chunk_items)} items "
+                        f"(qty={n_qty}, counting={n_counting}, "
+                        f"measurement={n_measurement})"
+                    )
 
-                # Log summary
-                n_counting = sum(1 for i in items if i.needs_counting)
-                n_measurement = sum(1 for i in items if i.needs_measurement)
-                n_qty = sum(1 for i in items if i.qty is not None)
-                logger.info(
-                    f"  Drawing reader: {len(items)} items "
-                    f"(qty={n_qty}, needs_counting={n_counting}, "
-                    f"needs_measurement={n_measurement}) [{dur:.1f}s]"
-                )
+                    all_items.extend(chunk_items)
+                    break
 
-                return items
+                except Exception as e:
+                    logger.error(f"  Chunk {chunk_idx+1} attempt {attempt + 1} failed: {e}")
+                    if attempt < MAX_RETRIES - 1:
+                        time.sleep(2 ** attempt)
+                    else:
+                        raise
 
-            except Exception as e:
-                logger.error(f"  Drawing reader attempt {attempt + 1} failed: {e}")
-                if attempt < MAX_RETRIES - 1:
-                    time.sleep(2 ** attempt)
-                else:
-                    raise
+        finally:
+            if uploaded:
+                try:
+                    client.files.delete(name=uploaded.name)
+                except Exception:
+                    pass
 
-    finally:
-        # Clean up uploaded files
-        for uf in uploaded_files:
-            try:
-                client.files.delete(name=uf.name)
-                logger.debug(f"  Deleted uploaded file: {uf.name}")
-            except Exception as e:
-                logger.warning(f"  Failed to delete uploaded file: {e}")
+    # Final summary
+    n_counting = sum(1 for i in all_items if i.needs_counting)
+    n_measurement = sum(1 for i in all_items if i.needs_measurement)
+    n_qty = sum(1 for i in all_items if i.qty is not None)
+    logger.info(
+        f"  Drawing reader total: {len(all_items)} items "
+        f"(qty={n_qty}, counting={n_counting}, measurement={n_measurement}) "
+        f"from {len(pdf_chunks)} chunk(s)"
+    )
 
-    return []
+    return all_items
