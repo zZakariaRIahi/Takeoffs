@@ -61,7 +61,12 @@ def _build_prompt(
 ) -> Tuple[str, set]:
     """Build a focused plan-reading prompt for one discipline."""
 
-    # ── Page info with views, plans, and focused instructions ──
+    # ── Page info with views, plans, and descriptions ──
+    # Skip only pages whose views are exclusively schedule/notes — no plan views at all.
+    # Do NOT skip based on STEP3 text: Flash sometimes writes SCHEDULE/NOTES for pages
+    # that also have a floor plan or detail in the corner.
+    _SKIP_ONLY_VIEWS = {"schedule", "notes", "abbreviation", "code_data"}
+
     page_lines = []
     skip_pages = set()  # pages with only schedules/notes — don't send to Pro
     for pi in sorted(package.page_info, key=lambda x: x.get("page", 0)):
@@ -71,8 +76,8 @@ def _build_prompt(
         views = pi.get("views", [])
         step3 = pi.get("step3_instruction", "")
 
-        # Skip pages that are only schedules/notes (already extracted)
-        if step3 and "SKIP" in step3.upper():
+        # Skip only if ALL views are schedule/notes — never skip based on STEP3 text
+        if views and all(v.lower().strip() in _SKIP_ONLY_VIEWS for v in views):
             skip_pages.add(pg)
             continue
 
@@ -82,9 +87,7 @@ def _build_prompt(
         if plans:
             line += f"\n    Plans: {', '.join(plans)}"
         if step3:
-            line += f"\n    TASK: {step3}"
-        elif plans:
-            line += f"\n    TASK: Extract all countable and measurable items from the views on this page."
+            line += f"\n    Description: {step3}"
         page_lines.append(line)
     pages_text = "\n".join(page_lines) or "  (no pages)"
 
@@ -134,6 +137,13 @@ def _build_prompt(
         "Abatement": ["General Requirements"],
         "Fire Protection": ["Fire Sprinklers"],
         "Landscape": ["Landscaping", "Site Work"],
+        "Unknown": [
+            "Concrete", "Masonry", "Metals", "Rough Carpentry", "Finish Carpentry",
+            "Waterproofing", "Insulation", "Roofing", "Stucco and Siding",
+            "Doors and Windows", "Drywall", "Tile & Solid Surfaces", "Flooring",
+            "Painting", "Bath and Accessories", "Cabinets", "Plumbing",
+            "HVAC and Sheet Metals", "Electrical", "Fire Sprinklers", "Site Work",
+        ],
     }
 
     trades_for_disc = DISCIPLINE_TRADES.get(discipline, [discipline])
@@ -153,14 +163,21 @@ An estimator breaks these into SEPARATE line items by trade — you must do the 
 All schedules, keynotes, and symbol definitions have ALREADY been extracted and are provided below.
 DO NOT re-read or re-extract schedule data from the images — trust the extracted data exactly.
 
-Each page below has a TASK instruction that tells you EXACTLY what to look for on that page.
-Follow the TASK instructions precisely — they were written by an estimator who already reviewed
-the drawings and identified what needs to be counted, measured, or extracted from each view.
+Each page below has a DESCRIPTION stating what plan type it is, its drawing scale, and its role:
+  - PRIMARY: the main counting plan for that area — count and measure all items here
+  - ENLARGED: zoomed-in version of an area already on a primary plan — use for dimensions
+    and specs only, do NOT recount items already counted on the primary plan
+  - DETAIL: construction assembly close-up — extract material specs only, no counting
+  - SCHEDULE/NOTES: tabular or text data — no visual extraction needed
+
+CRITICAL RULE — DO NOT DOUBLE COUNT:
+Count each item ONCE from its PRIMARY plan only. When you see the same item on an ENLARGED
+or DETAIL view, use that view only for dimensions or material specs — never for counting.
 
 Your job is to:
-1. FOLLOW THE TASK for each page — count the specific symbols named, measure the specific areas listed
-2. USE THE SCHEDULE DATA below to determine quantities for scheduled items (qty = row count)
-3. USE THE KEYNOTES below to identify scope items referenced on plans
+1. BUILD A COMPLETE BOM — for each page, extract every countable and measurable scope item
+2. USE THE SCHEDULE DATA below for scheduled items (doors, windows, fixtures) — qty = row count
+3. USE THE KEYNOTES below to identify scope items called out on plans
 4. PRODUCE A COMPLETE ITEM LIST organized by trade, with quantities and detailed extraction methods
 5. For EVERY finished surface, extract BOTH the base material AND the finish:
    - GWB wall → Drywall item (SF) + Painting item (SF)
@@ -387,6 +404,7 @@ def _process_discipline(
         return []
 
     # Call with retry
+    response = None
     for attempt in range(MAX_RETRIES + 1):
         try:
             response = client.models.generate_content(
@@ -401,7 +419,7 @@ def _process_discipline(
             break
         except Exception as e:
             err_str = str(e)
-            if attempt < MAX_RETRIES and ("503" in err_str or "UNAVAILABLE" in err_str or "SSL" in err_str or "EOF" in err_str):
+            if attempt < MAX_RETRIES and ("503" in err_str or "UNAVAILABLE" in err_str or "SSL" in err_str or "EOF" in err_str or "Broken pipe" in err_str or "BrokenPipe" in err_str or "pipe" in err_str.lower()):
                 wait = 15 * (attempt + 1)
                 logger.warning(f"  [{discipline}] Attempt {attempt+1} failed ({err_str[:80]}), retrying in {wait}s...")
                 time.sleep(wait)
@@ -409,6 +427,9 @@ def _process_discipline(
                 logger.error(f"  [{discipline}] Gemini call failed: {e}")
                 return []
 
+    if response is None:
+        logger.error(f"  [{discipline}] No response after all retries — skipping")
+        return []
     raw = response.text or ""
     parsed = _parse_response(raw)
     items = _to_items(parsed, discipline)
@@ -460,6 +481,13 @@ def extract_by_trade(
         elif pkg.pages:
             active[disc] = pkg
 
+    if not active:
+        # Fallback: if only Unknown pages exist (no sheet index), process them anyway
+        for disc in context_disciplines:
+            pkg = packages.get(disc)
+            if pkg and pkg.pages:
+                active[disc] = pkg
+                logger.info(f"  {disc:25s} | {len(pkg.pages)} pages → no sheet index, processing as active")
     if not active:
         logger.warning("No active disciplines found")
         return []

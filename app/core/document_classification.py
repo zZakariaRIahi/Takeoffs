@@ -18,18 +18,21 @@ from typing import Dict, List, Optional, Set
 class DocumentCategory(str, Enum):
     COVER_SHEET = "cover_sheet"
     INSTRUCTIONS_TO_BIDDER = "instructions_to_bidder"
+    ADDENDUM = "addendum"
     PROJECT_SPECIFICATIONS = "project_specifications"
     CONSTRUCTION_DRAWINGS = "construction_drawings"
     GENERAL_CONDITIONS = "general_conditions"
     SPECIAL_CONDITIONS = "special_conditions"
     BID_FORM = "bid_form"
     BID_SECURITY = "bid_security"
+    ENVIRONMENTAL_SURVEY = "environmental_survey"
 
 
 # Routing helpers — which categories need text vs vision vs both
 TEXT_CATEGORIES: Set[DocumentCategory] = {
     DocumentCategory.COVER_SHEET,
     DocumentCategory.INSTRUCTIONS_TO_BIDDER,
+    DocumentCategory.ADDENDUM,
     DocumentCategory.GENERAL_CONDITIONS,
     DocumentCategory.SPECIAL_CONDITIONS,
     DocumentCategory.BID_FORM,

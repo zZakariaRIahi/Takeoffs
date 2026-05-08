@@ -28,6 +28,11 @@ from app.extractors.specs_extractor import (
     extract_from_specs_only,
     extract_from_specs_with_drawings,
     merge_specs_into_packages,
+    extract_from_bid_forms,
+    deduplicate_items,
+    collapse_conditionals,
+    extract_scope_boundary,
+    filter_excluded_items,
 )
 from app.core.document_classification import DocumentCategory
 
@@ -170,17 +175,72 @@ def _cleanup_gcs(session_id: str):
 
 # ── File parsing ─────────────────────────────────────────────────────────────
 
-def _parse_tabular_files(file_data: List[Tuple[str, bytes]]):
-    """Parse CSV/XLSX/DOCX files into pre-extracted tables."""
+def _parse_uploaded_files(file_data: List[Tuple[str, bytes]]):
+    """Parse all uploaded files by type.
+
+    Returns:
+        pdf_files   — [(fname, bytes)] PDFs for the main pipeline
+        extra_tables — pre-extracted tables from CSV/XLSX
+        photo_files  — [(fname, bytes)] JPG/PNG walkthrough photos
+        docx_texts   — [(fname, text_str)] full text from DOCX files
+    """
     from app.core.estimate_models import ExtractedTable
 
     pdf_files = []
     extra_tables = []
+    photo_files = []
+    docx_texts = []
 
     for fname, content in file_data:
         ext = os.path.splitext(fname)[1].lower()
 
-        if ext == ".csv":
+        if ext in (".jpg", ".jpeg", ".png", ".webp"):
+            photo_files.append((fname, content))
+            logger.info(f"Queued photo: {fname} ({len(content)//1024} KB)")
+
+        elif ext in (".docx", ".doc"):
+            try:
+                from docx import Document
+                doc = Document(io.BytesIO(content))
+
+                # Extract full text (paragraphs + tables)
+                parts = []
+                for para in doc.paragraphs:
+                    t = para.text.strip()
+                    if t:
+                        parts.append(t)
+                for tbl in doc.tables:
+                    for row in tbl.rows:
+                        cells = [c.text.strip() for c in row.cells if c.text.strip()]
+                        if cells:
+                            parts.append(" | ".join(cells))
+                text = "\n".join(parts)
+                if text.strip():
+                    docx_texts.append((fname, text))
+                    logger.info(f"Extracted DOCX text: {fname} ({len(text)} chars)")
+
+                # Also pull tables as structured data (existing behavior)
+                for i, tbl in enumerate(doc.tables):
+                    if not tbl.rows:
+                        continue
+                    headers = [cell.text.strip() for cell in tbl.rows[0].cells]
+                    rows_data = []
+                    for row in tbl.rows[1:]:
+                        row_dict = {
+                            (headers[j] if j < len(headers) else f"Col{j}"): cell.text.strip()
+                            for j, cell in enumerate(row.cells)
+                        }
+                        rows_data.append(row_dict)
+                    if headers and rows_data:
+                        extra_tables.append(ExtractedTable(
+                            page_number=-1, filter_type="uploaded_file",
+                            table_title=f"{os.path.splitext(fname)[0]} — Table {i+1}",
+                            schedule_type="uploaded", headers=headers, rows=rows_data,
+                        ))
+            except Exception as e:
+                logger.error(f"Failed to parse DOCX {fname}: {e}")
+
+        elif ext == ".csv":
             try:
                 df = pd.read_csv(io.BytesIO(content))
                 if not df.empty:
@@ -212,34 +272,18 @@ def _parse_tabular_files(file_data: List[Tuple[str, bytes]]):
             except Exception as e:
                 logger.error(f"Failed to parse Excel {fname}: {e}")
 
-        elif ext in (".docx", ".doc"):
-            try:
-                from docx import Document
-                doc = Document(io.BytesIO(content))
-                for i, tbl in enumerate(doc.tables):
-                    rows_data = []
-                    headers = [cell.text.strip() for cell in tbl.rows[0].cells]
-                    for row in tbl.rows[1:]:
-                        row_dict = {}
-                        for j, cell in enumerate(row.cells):
-                            key = headers[j] if j < len(headers) else f"Col{j}"
-                            row_dict[key] = cell.text.strip()
-                        rows_data.append(row_dict)
-                    if headers and rows_data:
-                        extra_tables.append(ExtractedTable(
-                            page_number=-1, filter_type="uploaded_file",
-                            table_title=f"{os.path.splitext(fname)[0]} — Table {i+1}",
-                            schedule_type="uploaded", headers=headers, rows=rows_data,
-                        ))
-                        logger.info(f"Parsed DOCX {fname}/Table {i+1}: {len(rows_data)} rows")
-            except Exception as e:
-                logger.error(f"Failed to parse DOCX {fname}: {e}")
-
         elif ext == ".pdf":
             pdf_files.append((fname, content))
+
         else:
             logger.warning(f"Unsupported file type: {fname}")
 
+    return pdf_files, extra_tables, photo_files, docx_texts
+
+
+# Keep old name as alias so nothing else breaks
+def _parse_tabular_files(file_data):
+    pdf_files, extra_tables, _, _ = _parse_uploaded_files(file_data)
     return pdf_files, extra_tables
 
 
@@ -253,10 +297,14 @@ def _run_pipeline(job_id: str, file_data: List[Tuple[str, bytes]]):
     job["step_label"] = "Starting..."
 
     try:
-        # Separate PDFs from tabular files
-        pdf_files, extra_tables = _parse_tabular_files(file_data)
+        # Separate files by type
+        pdf_files, extra_tables, photo_files, docx_texts = _parse_uploaded_files(file_data)
         if extra_tables:
             logger.info(f"[{job_id}] Pre-parsed {len(extra_tables)} tables from uploaded files")
+        if photo_files:
+            logger.info(f"[{job_id}] {len(photo_files)} walkthrough photos queued")
+        if docx_texts:
+            logger.info(f"[{job_id}] {len(docx_texts)} DOCX documents queued for text extraction")
 
         # Step 1: Classify
         job["step_label"] = "Step 1: Classifying documents..."
@@ -269,6 +317,7 @@ def _run_pipeline(job_id: str, file_data: List[Tuple[str, bytes]]):
         # Detect what we have
         has_drawings = any(
             DocumentCategory.CONSTRUCTION_DRAWINGS in (cf.categories or set())
+            and (len(cf.visual_pages) / max(len(cf.pages), 1)) >= 0.10
             for cf in getattr(classification, 'files', [])
         )
         has_specs = any(
@@ -277,11 +326,22 @@ def _run_pipeline(job_id: str, file_data: List[Tuple[str, bytes]]):
         )
         logger.info(f"[{job_id}] Has drawings: {has_drawings}, Has specs: {has_specs}")
 
-        # ── CASE 1: Specs only (no drawings) ──
+        # Step 1b: Extract scope boundary from ITB (if present)
+        job["step_label"] = "Step 1b: Reading Invitation to Bid scope boundary..."
+        scope_boundary = extract_scope_boundary(classification) if pdf_files else None
+        if scope_boundary:
+            logger.info(
+                f"[{job_id}] Scope boundary: {len(scope_boundary.excluded)} exclusion(s), "
+                f"{len(scope_boundary.in_scope)} in-scope, {len(scope_boundary.alternates)} alternates"
+            )
+
+        # ── CASE 1: Specs only (no drawings) — bundle all docs into one call ──
         if has_specs and not has_drawings:
             job["step_label"] = "Step 2: Extracting takeoff from specifications..."
             t0 = time.time()
-            final_items = extract_from_specs_only(classification)
+            final_items = extract_from_specs_only(
+                classification, extra_text_docs=docx_texts, scope_boundary=scope_boundary
+            )
             job["step2a_time"] = time.time() - t0
             job["step2a_done"] = True
             job["step2d_done"] = True
@@ -313,11 +373,13 @@ def _run_pipeline(job_id: str, file_data: List[Tuple[str, bytes]]):
                     f"(need >= 3 for a real drawing set)"
                 )
                 if has_specs:
-                    # Fall back to specs extraction
+                    # Fall back to specs extraction — bundle docx_texts here too
                     logger.info(f"[{job_id}] Falling back to specs extraction")
                     job["step_label"] = "Step 2: Falling back to specs extraction..."
                     t0 = time.time()
-                    final_items = extract_from_specs_only(classification)
+                    final_items = extract_from_specs_only(
+                        classification, extra_text_docs=docx_texts, scope_boundary=scope_boundary
+                    )
                     job["step2a_time"] += time.time() - t0
                     job["step3_done"] = True
                     job["n_drawing_items"] = len(final_items)
@@ -347,6 +409,42 @@ def _run_pipeline(job_id: str, file_data: List[Tuple[str, bytes]]):
                 job["step3_done"] = True
                 job["n_drawing_items"] = len(final_items)
                 logger.info(f"[{job_id}] Step 3 done in {job['step3_time']:.0f}s")
+
+            # Step 3b: run spec extraction alongside drawings — specs contain material-level
+            # BOM items that drawings alone never produce (mortar bags, sealant cartridges, etc.)
+            if has_specs or docx_texts:
+                job["step_label"] = "Step 3b: Extracting spec BOM items..."
+                t0 = time.time()
+                spec_items = extract_from_specs_only(
+                    classification, extra_text_docs=docx_texts, scope_boundary=scope_boundary
+                )
+                final_items.extend(spec_items)
+                logger.info(f"[{job_id}] Step 3b: {len(spec_items)} spec items in {time.time()-t0:.0f}s")
+
+            # Drawings path: bid forms run separately (spec extractor skips bid-form-only files)
+            if pdf_files:
+                bid_items = extract_from_bid_forms(classification)
+                if bid_items:
+                    final_items.extend(bid_items)
+                    logger.info(f"[{job_id}] Bid forms: {len(bid_items)} items added")
+
+        # ── Dedup ────────────────────────────────────────────────────────────
+        job["step_label"] = "Consolidating duplicates..."
+        logger.info(f"[{job_id}] Deduplicating {len(final_items)} items...")
+        t_dedup = time.time()
+        final_items = deduplicate_items(final_items)
+        logger.info(f"[{job_id}] Dedup done in {time.time()-t_dedup:.1f}s — {len(final_items)} items")
+
+        # ── Filter against ITB exclusions ────────────────────────────────────
+        if scope_boundary and scope_boundary.excluded:
+            job["step_label"] = "Filtering excluded scope..."
+            final_items = filter_excluded_items(final_items, scope_boundary)
+            logger.info(f"[{job_id}] After exclusion filter: {len(final_items)} items")
+
+        # ── Collapse conditionals / inferred / NIC ───────────────────────────
+        job["step_label"] = "Collapsing conditional items..."
+        final_items = collapse_conditionals(final_items)
+        logger.info(f"[{job_id}] After collapse: {len(final_items)} items")
 
         # Serialize
         job["items"] = [

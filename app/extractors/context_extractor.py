@@ -147,10 +147,10 @@ DISCIPLINE_EXTRACT_PROMPT = """\
 You are a SENIOR CONSTRUCTION ESTIMATOR reading {discipline} drawing pages.
 
 You have TWO jobs:
-1. EXTRACT all text content (schedules, keynotes, symbols) — an AI vision model
-   will read these pages next, so it won't need to re-read any text you extract here.
-2. CLASSIFY each view on each page and write FOCUSED INSTRUCTIONS for what the
-   vision model should count, measure, or extract from each view.
+1. EXTRACT all text content (schedules, keynotes, symbols) — a vision model will
+   read these pages next and will use this extracted text as its primary data source.
+2. DESCRIBE each page — what plan type it is, what area it covers, what scale it is
+   drawn at, and whether it is a PRIMARY counting plan or an ENLARGED/DETAIL view.
 
 ═══════════════════════════════════════════════════════════════
 WHAT TO EXTRACT
@@ -188,31 +188,21 @@ A single page can have: a floor plan + a schedule + an enlarged detail.
 List ALL views on each page.
 
 ═══════════════════════════════════════════════════════════════
-STEP 3 INSTRUCTIONS
+PAGE DESCRIPTIONS
 ═══════════════════════════════════════════════════════════════
 
-For each non-schedule, non-notes view, write a SPECIFIC instruction telling the
-vision model exactly what to look for. Be precise — name the symbols, materials,
-and items to count or measure.
+For each view on each page, write a brief description that states:
+1. What the plan shows (area covered, rooms, systems)
+2. The drawing scale (1/8"=1'-0", 1/4"=1'-0", 1"=1'-0", NTS, etc.)
+3. One of these role tags:
+   - PRIMARY — main counting plan for this area (use for all item counts and measurements)
+   - ENLARGED — zoomed-in version of an area already on a primary plan (use for
+     dimensions/specs only, do NOT recount items already counted on the primary plan)
+   - DETAIL — construction assembly close-up (material specs only, no counting)
+   - SCHEDULE/NOTES — tabular or text data only (no visual extraction needed)
 
-Examples of GOOD instructions:
-  "Count door marks by type (101, 103A, 103B etc). Count plumbing fixtures: WC-1,
-   UR-1, LAV-1 symbols. Count fire extinguisher cabinets (FEC)."
-  "Count light fixtures by type: A1, A1-EM, A2, B1, EM, EX. Count occupancy
-   sensors (OS). Measure ACT-1 and ACT-2 ceiling areas."
-  "Measure north facade area for metal panel cladding. Count windows by type.
-   Measure roof edge/parapet length."
-  "Count items to REMOVE: doors (marked X), walls (dashed), ceiling areas (hatched).
-   Reference keynotes 1-15 for demolition scope."
-  "Extract insulation types and locations from wall section. Note vapor barrier
-   requirements. No counting — material specs only."
-  "Count receptacles (duplex, GFCI, dedicated). Count switches. Count data outlets.
-   Reference symbol legend from E-001."
-
-Examples of BAD instructions (too vague):
-  "Count electrical items" — which items? What symbols?
-  "Measure areas" — which areas? For what material?
-  "Extract scope" — what scope specifically?
+This tells the vision model exactly where to count from and where not to, preventing
+double-counting when the same items appear at multiple scales.
 
 ═══════════════════════════════════════════════════════════════
 OUTPUT FORMAT (use this EXACT markdown structure)
@@ -223,36 +213,32 @@ Brief summary of scope, special conditions, references to other disciplines.
 
 # PAGE INFO
 - Page 14 (A102):
-  Views: floor_plan, schedule, detail
-  Plans: First Floor Plan, Large Scale Toilet Plan, Door Schedule, Finish Schedule
-  STEP3: Count door marks on floor plan (match to door schedule). Count plumbing
-  fixtures: WC-1, UR-1, LAV-1. Count fire extinguisher cabinets. Read room
-  dimensions for flooring takeoff (Room 101: toilet, Room 102: tool storage,
-  Room 103: storage).
+  Views: floor_plan, schedule
+  Plans: First Floor Plan, Door Schedule, Finish Schedule
+  STEP3: PRIMARY floor plan at 1/8"=1'-0". Shows full building layout — all rooms,
+  doors, partitions, floor finishes, ceiling heights. Count all items from this plan.
+  Door schedule and finish schedule on same page (already extracted separately).
 - Page 15 (A103):
-  Views: RCP
-  Plans: Reflected Ceiling Plan
-  STEP3: Count light fixtures by type (A1, A1-EM, A2, B1-EM, EM, EX). Count
-  supply/return diffusers. Measure ACT-1 ceiling area, ACT-2 ceiling area,
-  GWB ceiling area.
+  Views: floor_plan, RCP
+  Plans: Enlarged Toilet Room Plan, Reflected Ceiling Plan
+  STEP3: ENLARGED toilet room at 1/4"=1'-0" — do NOT recount doors or partitions,
+  already on A102. Use only for toilet accessory locations and plumbing fixture specs.
+  RCP is PRIMARY for ceiling finishes — measure ACT-1 and GWB ceiling areas here,
+  count light fixture types.
 - Page 17 (A105):
   Views: elevation
   Plans: North Elevation, South Elevation, East Elevation, West Elevation
-  STEP3: Measure each facade area for metal panel cladding (Color 1, Color 2).
-  Count windows by type. Measure roof edge length. Identify soffit materials.
+  STEP3: PRIMARY elevations at 1/8"=1'-0". These are the only source for facade
+  scope — measure cladding areas, count windows by type, measure parapet length.
 - Page 18 (A106):
   Views: section, detail
   Plans: Building Section A, Wall Section Details
-  STEP3: Extract wall assembly components (insulation, sheathing, vapor barrier).
-  Note flashing details. No symbol counting — material specs and assembly info.
-- Page 20 (A108):
-  Views: detail
-  Plans: Door Head/Jamb/Sill Details, Roof Edge Details
-  STEP3: Extract assembly components only. No counting or measuring needed.
+  STEP3: DETAIL at NTS. Extract wall assembly specs (insulation R-value, sheathing
+  type, vapor barrier). No counting — material specs and assembly info only.
 - Page 13 (A101):
   Views: notes, schedule
   Plans: General Notes, Abbreviations, Code Data
-  STEP3: SKIP — notes and schedules already extracted. No vision work needed.
+  STEP3: SCHEDULE/NOTES — no plan views. No visual extraction needed.
 
 # SYMBOLS
 - WC-1: Wall-mounted water closet, Zurn Z5615 [fixture]
@@ -268,9 +254,10 @@ IMPORTANT RULES:
 - Page numbers are 0-based integers shown above each image
 - DO NOT extract schedule table contents — just flag pages that have schedules in Views
 - Preserve exact abbreviations in keynotes and symbols
-- Include EVERY page in PAGE INFO with views, plans, and STEP3 instruction
-- STEP3 instruction must be SPECIFIC — name exact symbols, materials, items to count/measure
-- For pages with only schedules/notes: write "STEP3: SKIP — already extracted"
+- Include EVERY page in PAGE INFO with views, plans, and STEP3 description
+- STEP3 must always state: scale, role tag (PRIMARY/ENLARGED/DETAIL/SCHEDULE/NOTES),
+  and what area/scope the plan covers
+- For ENLARGED views: name which primary plan sheet already covers those items
 """
 
 
@@ -710,6 +697,7 @@ def _extract_one_schedule_page(
     sheet_info: Dict[str, str],
 ) -> List[Dict[str, Any]]:
     """Extract schedules from a single page."""
+    import time
     sid = sheet_info.get("sheet_id", f"PAGE-{page_num}")
     prompt = SCHEDULE_EXTRACT_PROMPT.replace("{page_num}", str(page_num))
 
@@ -719,14 +707,25 @@ def _extract_one_schedule_page(
         genai_types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"),
     ]
 
-    try:
-        response = client.models.generate_content(
-            model=MODEL,
-            contents=contents,
-            config=genai_types.GenerateContentConfig(temperature=0.1),
-        )
-    except Exception as e:
-        logger.error(f"    Schedule extraction failed for page {page_num}: {e}")
+    response = None
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model=MODEL,
+                contents=contents,
+                config=genai_types.GenerateContentConfig(temperature=0.1),
+            )
+            break
+        except Exception as e:
+            err_str = str(e)
+            if attempt < 2 and ("503" in err_str or "UNAVAILABLE" in err_str or "SSL" in err_str or "EOF" in err_str):
+                wait = 15 * (attempt + 1)
+                logger.warning(f"    Page {page_num}: attempt {attempt+1} failed ({err_str[:80]}), retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                logger.error(f"    Schedule extraction failed for page {page_num}: {e}")
+                return []
+    if not response:
         return []
 
     raw = response.text or ""
@@ -940,6 +939,9 @@ def extract_context(
     page_images: Dict[int, bytes] = {}
 
     for cf in classification.files:
+        if cf.categories and DocumentCategory.ENVIRONMENTAL_SURVEY in cf.categories:
+            logger.info(f"  Skipping environmental survey: {cf.filename}")
+            continue
         if cf.categories and not cf.categories.intersection(_KEEP_CATEGORIES):
             continue
         for page in cf.pages:

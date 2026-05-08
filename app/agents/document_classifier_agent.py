@@ -18,11 +18,18 @@ import json
 import logging
 import re
 import tempfile
+import threading
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Optional, Set, Tuple
+
+# Limit concurrent page renders to 2 regardless of CPU count.
+# PyMuPDF rendering is CPU-heavy — without this cap, an 80-page drawing set
+# saturates all 8 cores and starves FastAPI's HTTP server.
+# 2 concurrent renders ≈ 25% CPU, leaving headroom for the rest of the pipeline.
+_RENDER_SEMAPHORE = threading.Semaphore(2)
 
 import fitz  # PyMuPDF
 from google.genai import types
@@ -57,13 +64,21 @@ Analyze the uploaded document and provide TWO things:
 ═══ CATEGORIES (assign one or more) ═══
 
 1. cover_sheet - project title page, table of contents, summary
-2. instructions_to_bidder - bidding procedures, submission requirements
-3. project_specifications - technical specs (CSI Divisions 01-49), materials, methods
-4. construction_drawings - the document contains actual construction drawing sheets
-5. general_conditions - AIA A201, standard contract conditions
-6. special_conditions - project-specific amendments to general conditions
-7. bid_form - proposal forms, bid schedules, pricing sheets
-8. bid_security - bid bond forms, surety requirements
+2. instructions_to_bidder - bidding procedures, submission requirements, invitation to bid
+3. addendum - issued changes, clarifications, or additions to the original bid package.
+   Addenda OVERRIDE earlier documents. Key signals: titled "Addendum", "Amendment",
+   "Add #N", numbered revisions to drawings or specs, scope change notices.
+   Assign this alongside other categories (e.g., addendum + construction_drawings,
+   or addendum + project_specifications) — the addendum tag marks that it supersedes base docs.
+4. project_specifications - technical specs (CSI Divisions 01-49), materials, methods
+5. construction_drawings - the document contains actual construction drawing sheets
+6. general_conditions - AIA A201, standard contract conditions
+7. special_conditions - project-specific amendments to general conditions
+8. bid_form - proposal forms, bid schedules, pricing sheets
+9. bid_security - bid bond forms, surety requirements
+10. environmental_survey - hazmat surveys, environmental design manuals, asbestos/lead paint
+    surveys, IEPA/IDPH reports, geotechnical reports. These are informational background
+    documents — NOT bid scope documents.
 
 ═══ DRAWING PAGE IDENTIFICATION ═══
 
@@ -76,12 +91,17 @@ Construction drawing sheets are pages with:
 NOT drawing sheets: text-heavy spec pages, bid forms, conditions, general requirements,
 tables of contents - even if they contain small embedded figures or diagrams.
 
+IMPORTANT: Floor plans inside an environmental survey or hazmat report are hazmat LOCATION
+MAPS — they are NOT construction drawing sheets. Do NOT classify them as drawing pages.
+
 ═══ RULES ═══
 
 - A document can belong to MULTIPLE categories.
 - Search through the ENTIRE document, not just the beginning.
 - Do NOT return categories that have zero evidence.
 - Only include "construction_drawings" in categories if you identify actual drawing pages.
+- If a document is an environmental_survey, do NOT also assign "construction_drawings"
+  even if it contains floor plan pages. Those pages are hazmat location maps, not scope drawings.
 - For drawing_pages: return page numbers (1-based) of ALL pages that are actual drawing sheets.
   If the ENTIRE file is a drawing set, return "all" instead of listing every page number.
   If there are no drawing pages, return an empty array [].
@@ -90,6 +110,7 @@ Return ONLY a JSON object (no markdown fences, no extra text):
 {"categories": ["project_specifications", "general_conditions"], "drawing_pages": []}
 {"categories": ["construction_drawings"], "drawing_pages": "all"}
 {"categories": ["project_specifications", "construction_drawings"], "drawing_pages": [195, 196, 197]}
+{"categories": ["environmental_survey"], "drawing_pages": []}
 """
 
 
@@ -564,7 +585,9 @@ def render_drawing_images(
         if not drawing_pages:
             continue
 
-        n_workers = min(len(drawing_pages), multiprocessing.cpu_count() or 4)
+        # _RENDER_SEMAPHORE caps actual concurrent work to 2 regardless of thread count.
+        # Cap threads at 8 so we don't spin up 80 idle threads for large files.
+        n_workers = min(len(drawing_pages), 8)
         logger.info(
             f"Rendering {len(drawing_pages)} drawing pages for {cf.filename} "
             f"at {DRAWING_DPI} DPI ({n_workers} workers)"
@@ -579,12 +602,13 @@ def render_drawing_images(
         t0 = time.time()
 
         def _render_one(page_info):
-            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-            if page_info.page_number < len(doc):
-                zoom = DRAWING_DPI / 72
-                pix = doc[page_info.page_number].get_pixmap(matrix=fitz.Matrix(zoom, zoom))
-                page_info.image_bytes = pix.tobytes("jpeg", 85)
-            doc.close()
+            with _RENDER_SEMAPHORE:  # max 2 concurrent renders globally
+                doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                if page_info.page_number < len(doc):
+                    zoom = DRAWING_DPI / 72
+                    pix = doc[page_info.page_number].get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+                    page_info.image_bytes = pix.tobytes("jpeg", 85)
+                doc.close()
 
         with ThreadPoolExecutor(max_workers=n_workers) as executor:
             executor.map(_render_one, drawing_pages)
