@@ -11,6 +11,7 @@ Does NOT re-read schedules, keynotes, or text — all of that comes from Step 2.
 """
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -214,11 +215,28 @@ SYMBOLS LEGEND (already extracted)
 QUANTITY EXTRACTION RULES
 ═══════════════════════════════════════════════════════════════
 
-FOR SCHEDULE ITEMS:
-  - qty = number of rows in the schedule for that item
+FOR SCHEDULE ITEMS (count schedules — doors, windows, fixtures, hardware, equipment):
+  - qty = number of rows in the schedule for that item type
   - Include full spec from schedule data (size, material, manufacturer)
   - method: "from_schedule: [Schedule Name], [N] rows"
   - source: "schedule:[MARK]"
+
+FOR FINISH SCHEDULE (cross-reference schedule — maps rooms to finish type codes):
+  A finish schedule assigns finish codes per room — it is NOT a count schedule.
+  DO NOT use row count or gross floor area as the quantity.
+  For each finish type code (e.g., LVT-1, ACT-1, RB-1, PT-1):
+    1. Find all rows in the finish schedule that reference that finish code in any column
+    2. SKIP any row where "Exist. To Remain", "Existing to Remain", "ETR", or
+       similar column contains any non-empty value (X, ✓, Yes, "Existing", etc.)
+    3. For each remaining active room:
+       a. First check the [FROM MECHANICAL] ventilation/equipment schedules for a room SF value
+       b. If not available, find the room on the floor plan and read its dimensions
+       c. Calculate the room area
+    4. Sum all active room areas → that is the SF quantity for this finish type
+  Show math explicitly in the method field:
+    "finish_schedule: Rm 101=300SF + Rm 102=500SF (skipped Rm 135, 137 ETR) → LVT-1=800SF"
+  For WALL BASE (RB): calculate as LF of room perimeter (not SF)
+  If any room's area is unreadable, set qty=null and list unreadable rooms in the review field
 
 FOR COUNTING SYMBOLS ON PLANS (EA items):
   - Use QUADRANT method: divide page into NW, NE, SW, SE
@@ -524,6 +542,39 @@ def extract_by_trade(
 
     logger.info(f"  {len(page_images)} page images available (from Step 1, 300 DPI)")
 
+    # Augment Architectural/Interior packages with mechanical room-area schedules.
+    # Mechanical ventilation schedules often have room SF that Architectural needs
+    # for room-by-room finish area calculations.
+    _ARCH_DISCS = {"Architectural", "Interior", "Unknown"}
+    mech_room_schedules: List[Dict] = []
+    for mdisc in ("Mechanical", "Mechanical Demolition"):
+        mpkg = packages.get(mdisc)
+        if mpkg:
+            for s in mpkg.schedules:
+                headers_lower = " ".join(h.lower() for h in s.get("headers", []))
+                stype = s.get("type", "").lower()
+                if stype in ("ventilation", "mechanical", "equipment") or any(
+                    k in headers_lower for k in ("room", " sf", "area", "sq ft", "cfm")
+                ):
+                    mech_room_schedules.append(
+                        {**s, "title": f"[FROM MECHANICAL] {s.get('title', '')}"}
+                    )
+    if mech_room_schedules:
+        logger.info(
+            f"  Cross-discipline: merging {len(mech_room_schedules)} mechanical room "
+            f"schedule(s) into Architectural package(s)"
+        )
+        dispatch: Dict[str, DisciplinePackage] = {}
+        for disc, pkg in active.items():
+            if disc in _ARCH_DISCS:
+                aug = copy.copy(pkg)
+                aug.schedules = list(pkg.schedules) + mech_room_schedules
+                dispatch[disc] = aug
+            else:
+                dispatch[disc] = pkg
+    else:
+        dispatch = active
+
     # Process each discipline in parallel
     all_items: List[EstimateItem] = []
 
@@ -533,7 +584,7 @@ def extract_by_trade(
                 _process_discipline,
                 disc, pkg, page_images, project_context,
             ): disc
-            for disc, pkg in active.items()
+            for disc, pkg in dispatch.items()
         }
 
         for future in as_completed(futures):
